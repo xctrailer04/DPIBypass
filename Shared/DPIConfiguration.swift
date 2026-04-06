@@ -92,7 +92,7 @@ public struct DPIConfiguration: Codable {
     }
 
     // MARK: - Persistence
-    public static let appGroupID = "group.com.voiplet.dpibypass"
+    public static let appGroupID = "group.9812ec7818e07d81.1"
     private static let configKey = "dpi_configuration"
 
     public func save() {

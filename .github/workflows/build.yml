@@ -19,6 +19,39 @@ jobs:
         sudo xcode-select -s "$XCODE_PATH"
         xcodebuild -version
 
+    - name: Install certificate and provisioning profile
+      env:
+        P12_BASE64: ${{ secrets.P12_BASE64 }}
+        P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        MOBILEPROVISION_BASE64: ${{ secrets.MOBILEPROVISION_BASE64 }}
+      run: |
+        # Decode cert
+        echo "$P12_BASE64" | base64 --decode > /tmp/cert.p12
+        echo "$MOBILEPROVISION_BASE64" | base64 --decode > /tmp/profile.mobileprovision
+
+        # Create keychain
+        security create-keychain -p "build" /tmp/build.keychain
+        security default-keychain -s /tmp/build.keychain
+        security unlock-keychain -p "build" /tmp/build.keychain
+        security set-keychain-settings -t 3600 /tmp/build.keychain
+
+        # Import certificate
+        security import /tmp/cert.p12 -k /tmp/build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+        security set-key-partition-list -S apple-tool:,apple: -s -k "build" /tmp/build.keychain
+
+        # Show identity
+        security find-identity -v /tmp/build.keychain
+        IDENTITY=$(security find-identity -v -p codesigning /tmp/build.keychain | head -1 | grep -o '"[^"]*"' | tr -d '"')
+        echo "SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+
+        # Install provisioning profile
+        mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+        PROFILE_UUID=$(grep -a -A1 UUID /tmp/profile.mobileprovision | grep -o '[-A-Fa-f0-9]\{36\}')
+        cp /tmp/profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/${PROFILE_UUID}.mobileprovision
+        echo "PROFILE_UUID=$PROFILE_UUID" >> $GITHUB_ENV
+        echo "Identity: $IDENTITY"
+        echo "Profile UUID: $PROFILE_UUID"
+
     - name: Install xcodegen
       run: brew install xcodegen
 
@@ -35,10 +68,10 @@ jobs:
         c = c.replace(old, new)
         with open('DPIBypass.xcodeproj/project.pbxproj', 'w') as f:
             f.write(c)
-        print('Done: injected HEADER_SEARCH_PATHS')
+        print('Injected HEADER_SEARCH_PATHS')
         "
 
-    - name: Build
+    - name: Build & Archive
       run: |
         xcodebuild -project DPIBypass.xcodeproj \
           -scheme DPIBypass \
@@ -46,17 +79,57 @@ jobs:
           -configuration Release \
           -archivePath build/DPIBypass.xcarchive \
           archive \
-          CODE_SIGN_IDENTITY="" \
-          CODE_SIGNING_REQUIRED=NO \
-          CODE_SIGNING_ALLOWED=NO \
+          CODE_SIGN_IDENTITY="${SIGNING_IDENTITY}" \
+          CODE_SIGNING_REQUIRED=YES \
+          CODE_SIGNING_ALLOWED=YES \
+          PROVISIONING_PROFILE="${PROFILE_UUID}" \
+          DEVELOPMENT_TEAM=G2JRFS2N68 \
           'HEADER_SEARCH_PATHS=$(inherited) $(SRCROOT)/PacketTunnelExtension/lwip $(SRCROOT)/PacketTunnelExtension/lwip/lwip-src/src/include' \
           GCC_WARN_INHIBIT_ALL_WARNINGS=YES
 
-    - name: Create IPA
+    - name: Export IPA
       run: |
-        mkdir -p build/Payload
-        cp -r build/DPIBypass.xcarchive/Products/Applications/DPIBypass.app build/Payload/
-        cd build && zip -r ../DPIBypass.ipa Payload/
+        cat > /tmp/export.plist << 'EOF'
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>method</key>
+            <string>development</string>
+            <key>teamID</key>
+            <string>G2JRFS2N68</string>
+            <key>compileBitcode</key>
+            <false/>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+                <key>app.carrot8950.aries5347</key>
+                <string>${PROFILE_UUID}</string>
+                <key>app.carrot8950.aries5347.tunnel</key>
+                <string>${PROFILE_UUID}</string>
+            </dict>
+        </dict>
+        </plist>
+        EOF
+        # Replace env var in plist
+        sed -i '' "s/\${PROFILE_UUID}/${PROFILE_UUID}/g" /tmp/export.plist
+
+        xcodebuild -exportArchive \
+          -archivePath build/DPIBypass.xcarchive \
+          -exportPath build/export \
+          -exportOptionsPlist /tmp/export.plist \
+          -allowProvisioningUpdates || true
+
+        # Fallback: manual IPA creation if exportArchive fails
+        if [ ! -f build/export/*.ipa ]; then
+          echo "exportArchive failed, creating IPA manually..."
+          mkdir -p build/Payload
+          cp -r build/DPIBypass.xcarchive/Products/Applications/DPIBypass.app build/Payload/
+          cd build && zip -r ../DPIBypass.ipa Payload/
+        else
+          cp build/export/*.ipa DPIBypass.ipa
+        fi
 
     - name: Upload IPA
       uses: actions/upload-artifact@v4

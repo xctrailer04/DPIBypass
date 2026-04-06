@@ -48,7 +48,7 @@ class VPNManager: ObservableObject {
         manager.localizedDescription = "DPI Bypass"
 
         let proto = NETunnelProviderProtocol()
-        proto.providerBundleIdentifier = "com.voiplet.dpibypass.tunnel"
+        proto.providerBundleIdentifier = "app.carrot8950.aries5347.tunnel"
         proto.serverAddress = "localhost" // Local VPN, no remote server
         proto.disconnectOnSleep = false
 

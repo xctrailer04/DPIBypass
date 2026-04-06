@@ -8,11 +8,11 @@
     </array>
     <key>com.apple.security.application-groups</key>
     <array>
-        <string>group.com.voiplet.dpibypass</string>
+        <string>group.9812ec7818e07d81.1</string>
     </array>
     <key>com.apple.security.keychain-access-groups</key>
     <array>
-        <string>$(AppIdentifierPrefix)com.voiplet.dpibypass</string>
+        <string>G2JRFS2N68.*</string>
     </array>
 </dict>
 </plist>

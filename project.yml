@@ -21,7 +21,7 @@ targets:
       path: DPIBypass/App/Info.plist
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.voiplet.dpibypass
+        PRODUCT_BUNDLE_IDENTIFIER: app.carrot8950.aries5347
     entitlements:
       path: DPIBypass/DPIBypass.entitlements
     dependencies:
@@ -71,7 +71,7 @@ targets:
           NSExtensionPrincipalClass: PacketTunnelExtension.PacketTunnelProvider
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.voiplet.dpibypass.tunnel
+        PRODUCT_BUNDLE_IDENTIFIER: app.carrot8950.aries5347.tunnel
         SWIFT_OBJC_BRIDGING_HEADER: PacketTunnelExtension/PacketTunnelExtension-Bridging-Header.h
         HEADER_SEARCH_PATHS:
           - "$(inherited)"
