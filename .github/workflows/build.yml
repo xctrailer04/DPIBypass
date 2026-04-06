@@ -22,80 +22,21 @@ jobs:
     - name: Install xcodegen
       run: brew install xcodegen
 
-    - name: Write project.yml
-      run: |
-        cat > project.yml << 'XEOF'
-        name: DPIBypass
-        options:
-          bundleIdPrefix: com.voiplet
-          deploymentTarget:
-            iOS: "15.0"
-        settings:
-          base:
-            DEVELOPMENT_TEAM: ""
-            CODE_SIGN_IDENTITY: ""
-            CODE_SIGNING_REQUIRED: "NO"
-            CODE_SIGNING_ALLOWED: "NO"
-        targets:
-          DPIBypass:
-            type: application
-            platform: iOS
-            sources:
-              - DPIBypass/
-              - Shared/
-            settings:
-              base:
-                PRODUCT_BUNDLE_IDENTIFIER: com.voiplet.dpibypass
-                INFOPLIST_FILE: DPIBypass/App/Info.plist
-            entitlements:
-              path: DPIBypass/DPIBypass.entitlements
-            dependencies:
-              - target: PacketTunnelExtension
-                embed: true
-          PacketTunnelExtension:
-            type: app-extension
-            platform: iOS
-            sources:
-              - PacketTunnelExtension/
-              - Shared/
-            settings:
-              base:
-                PRODUCT_BUNDLE_IDENTIFIER: com.voiplet.dpibypass.tunnel
-                INFOPLIST_FILE: PacketTunnelExtension/Info.plist
-                SWIFT_OBJC_BRIDGING_HEADER: PacketTunnelExtension/PacketTunnelExtension-Bridging-Header.h
-            entitlements:
-              path: PacketTunnelExtension/PacketTunnelExtension.entitlements
-        XEOF
-        # Fix indentation — strip leading 8 spaces from heredoc
-        sed -i '' 's/^        //' project.yml
-
-    - name: Set lwIP header search paths
-      run: |
-        # xcodegen HEADER_SEARCH_PATHS can be tricky, set it via xcconfig
-        cat > PacketTunnelExtension/lwip.xcconfig << 'EOF'
-        HEADER_SEARCH_PATHS = $(inherited) $(SRCROOT)/PacketTunnelExtension/lwip $(SRCROOT)/PacketTunnelExtension/lwip/lwip-src/src/include
-        EOF
-        sed -i '' 's/^        //' PacketTunnelExtension/lwip.xcconfig
-
     - name: Generate Xcode Project
       run: xcodegen generate
 
-    - name: Inject xcconfig into Xcode project
+    - name: Fix lwIP headers
       run: |
-        # Add xcconfig to the PacketTunnelExtension target build settings
-        python3 << 'PYEOF'
-        import re
+        python3 -c "
         with open('DPIBypass.xcodeproj/project.pbxproj', 'r') as f:
-            content = f.read()
-        # Add HEADER_SEARCH_PATHS to all build configurations
-        content = content.replace(
-            'INFOPLIST_FILE = PacketTunnelExtension/Info.plist;',
-            'INFOPLIST_FILE = PacketTunnelExtension/Info.plist;\n\t\t\t\tHEADER_SEARCH_PATHS = (\n\t\t\t\t\t"$(inherited)",\n\t\t\t\t\t"$(SRCROOT)/PacketTunnelExtension/lwip",\n\t\t\t\t\t"$(SRCROOT)/PacketTunnelExtension/lwip/lwip-src/src/include",\n\t\t\t\t);'
-        )
+            c = f.read()
+        old = 'INFOPLIST_FILE = PacketTunnelExtension/Info.plist;'
+        new = old + chr(10) + '\t\t\t\tHEADER_SEARCH_PATHS = (\"' + chr(36) + '(inherited)\", \"' + chr(36) + '(SRCROOT)/PacketTunnelExtension/lwip\", \"' + chr(36) + '(SRCROOT)/PacketTunnelExtension/lwip/lwip-src/src/include\");'
+        c = c.replace(old, new)
         with open('DPIBypass.xcodeproj/project.pbxproj', 'w') as f:
-            f.write(content)
-        print("Injected HEADER_SEARCH_PATHS into pbxproj")
-        PYEOF
+            f.write(c)
+        print('Done: injected HEADER_SEARCH_PATHS')
+        "
 
     - name: Build
       run: |

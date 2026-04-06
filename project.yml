@@ -3,7 +3,6 @@ options:
   bundleIdPrefix: com.voiplet
   deploymentTarget:
     iOS: "15.0"
-  xcodeVersion: "15.4"
 
 settings:
   base:
