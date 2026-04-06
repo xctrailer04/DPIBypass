@@ -229,37 +229,22 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 dlog("  TLS SNI=\(sni)")
                 httpsFragCount += 1
 
-                // === ByeDPI DESYNC: fake packet + SNI fragmentation ===
+                // === DPI BYPASS: multiple strategies ===
+                let payloadBytes = [UInt8](payload)
 
-                // Step 1: Send FAKE ClientHello with TTL=1 (DPI sees it, server doesn't)
-                var fakeTTL: Int32 = 1
-                Darwin.setsockopt(fd, IPPROTO_IP, IP_TTL, &fakeTTL, socklen_t(MemoryLayout<Int32>.size))
-                let fakeHello = FakePacketInjector.fakeTLSClientHello
-                Darwin.send(fd, fakeHello, fakeHello.count, 0)
-                dlog("  DESYNC: fake sent TTL=1 [\(fakeHello.count)B]")
+                // Strategy 1: Split first 1 byte, then rest (tiny first segment)
+                // This defeats DPI that reads first N bytes of TLS record
+                let split1 = Data(payloadBytes[0..<1])
+                let split2 = Data(payloadBytes[1...])
 
-                // Wait for fake to leave buffer
-                usleep(2000)  // 2ms
+                let s1 = [UInt8](split1)
+                let s2 = [UInt8](split2)
 
-                // Step 2: Restore normal TTL
-                var normalTTL: Int32 = 64
-                Darwin.setsockopt(fd, IPPROTO_IP, IP_TTL, &normalTTL, socklen_t(MemoryLayout<Int32>.size))
-
-                // Step 3: Send real ClientHello fragmented at SNI boundary
-                if config.httpsFragmentEnabled,
-                   let result = SNIFragmentation.fragment(payload: payload, config: config) {
-                    dlog("  SNI FRAG → \(result.fragments.count) parts")
-                    for (i, frag) in result.fragments.enumerated() {
-                        let b = [UInt8](frag)
-                        let sent = Darwin.send(fd, b, b.count, 0)
-                        dlog("  FRAG[\(i)] sent \(sent)/\(b.count)B")
-                        if i < result.fragments.count - 1 { usleep(1000) }
-                    }
-                } else {
-                    // Fallback: send as-is
-                    let b = [UInt8](payload)
-                    Darwin.send(fd, b, b.count, 0)
-                }
+                let sent1 = Darwin.send(fd, s1, s1.count, 0)
+                dlog("  SPLIT[0] sent \(sent1)/1B")
+                usleep(5000)  // 5ms delay between segments
+                let sent2 = Darwin.send(fd, s2, s2.count, 0)
+                dlog("  SPLIT[1] sent \(sent2)/\(s2.count)B")
 
                 state.firstPayload = false
                 continue
