@@ -7,7 +7,7 @@
         <key>NSExtensionPointIdentifier</key>
         <string>com.apple.networkextension.packet-tunnel</string>
         <key>NSExtensionPrincipalClass</key>
-        <string>$(PRODUCT_MODULE_NAME).PacketTunnelProvider</string>
+        <string>PacketTunnelExtension.PacketTunnelProvider</string>
     </dict>
     <key>CFBundleDisplayName</key>
     <string>DPI Bypass Tunnel</string>

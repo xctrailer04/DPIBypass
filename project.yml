@@ -64,6 +64,11 @@ targets:
       - Shared/
     info:
       path: PacketTunnelExtension/Info.plist
+      properties:
+        CFBundleDisplayName: DPI Bypass Tunnel
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: PacketTunnelExtension.PacketTunnelProvider
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.voiplet.dpibypass.tunnel
