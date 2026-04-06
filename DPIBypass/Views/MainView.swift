@@ -2,150 +2,208 @@ import SwiftUI
 
 struct MainView: View {
     @ObservedObject private var vpn = VPNManager.shared
+    @State private var animatePulse = false
 
     var body: some View {
-        NavigationView {
-            ScrollView {
-                VStack(spacing: 20) {
-                    // Connection Card
-                    connectionCard
+        NavigationStack {
+            ZStack {
+                // Background gradient
+                LinearGradient(
+                    colors: [Color(.systemBackground), Color(.systemGroupedBackground)],
+                    startPoint: .top, endPoint: .bottom
+                ).ignoresSafeArea()
 
-                    // Statistics
-                    if vpn.isConnected {
-                        statisticsCard
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 24) {
+                        // Hero connection card
+                        heroCard
+                            .padding(.top, 8)
+
+                        // Live stats
+                        if vpn.isConnected {
+                            statsGrid
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+
+                        // Presets
+                        presetsCard
+
+                        // Menu items
+                        VStack(spacing: 12) {
+                            NavigationLink(destination: SettingsView()) {
+                                menuRow(
+                                    icon: "slider.horizontal.3",
+                                    iconColor: .blue,
+                                    title: "Settings",
+                                    subtitle: "Bypass techniques & DNS"
+                                )
+                            }
+                            NavigationLink(destination: LogView()) {
+                                menuRow(
+                                    icon: "terminal",
+                                    iconColor: .green,
+                                    title: "Debug Console",
+                                    subtitle: "Live packet logs"
+                                )
+                            }
+                        }
+
+                        // Version footer
+                        Text("DPI Bypass v1.0 — Voiplet Teknoloji")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .padding(.bottom, 20)
                     }
-
-                    // Quick Presets
-                    presetsSection
-
-                    // Navigation
-                    NavigationLink(destination: SettingsView()) {
-                        settingsRow(icon: "gearshape.fill", title: "Settings", subtitle: "Configure bypass techniques")
-                    }
-
-                    NavigationLink(destination: LogView()) {
-                        settingsRow(icon: "doc.text.magnifyingglass", title: "Debug Log", subtitle: "View packet logs, share as TXT")
-                    }
+                    .padding(.horizontal)
                 }
-                .padding()
             }
             .navigationTitle("DPI Bypass")
-            .background(Color(.systemGroupedBackground))
+            .navigationBarTitleDisplayMode(.large)
+            .animation(.easeInOut(duration: 0.3), value: vpn.isConnected)
         }
     }
 
-    // MARK: - Connection Card
+    // MARK: - Hero Card
 
-    private var connectionCard: some View {
-        VStack(spacing: 16) {
-            // Status indicator
-            Circle()
-                .fill(vpn.isConnected ? Color.green : Color.red.opacity(0.6))
-                .frame(width: 80, height: 80)
-                .overlay(
-                    Image(systemName: vpn.isConnected ? "shield.checkered" : "shield.slash")
-                        .font(.system(size: 32))
-                        .foregroundColor(.white)
-                )
-                .shadow(color: vpn.isConnected ? .green.opacity(0.4) : .clear, radius: 12)
+    private var heroCard: some View {
+        VStack(spacing: 20) {
+            ZStack {
+                // Pulse ring
+                if vpn.isConnected {
+                    Circle()
+                        .stroke(Color.green.opacity(0.3), lineWidth: 2)
+                        .frame(width: 110, height: 110)
+                        .scaleEffect(animatePulse ? 1.3 : 1.0)
+                        .opacity(animatePulse ? 0 : 0.6)
+                        .animation(.easeOut(duration: 1.5).repeatForever(autoreverses: false), value: animatePulse)
+                }
 
-            Text(vpn.statusText)
-                .font(.headline)
-                .foregroundColor(vpn.isConnected ? .green : .secondary)
+                // Shield icon
+                Circle()
+                    .fill(
+                        vpn.isConnected
+                            ? LinearGradient(colors: [.green, .green.opacity(0.7)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            : LinearGradient(colors: [.gray.opacity(0.3), .gray.opacity(0.15)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    )
+                    .frame(width: 90, height: 90)
+                    .overlay(
+                        Image(systemName: vpn.isConnected ? "shield.checkered" : "shield.slash")
+                            .font(.system(size: 36, weight: .medium))
+                            .foregroundStyle(vpn.isConnected ? .white : .secondary)
+                    )
+                    .shadow(color: vpn.isConnected ? .green.opacity(0.4) : .clear, radius: 16, y: 4)
+            }
+            .onAppear { animatePulse = true }
 
-            // Connect/Disconnect button
+            VStack(spacing: 4) {
+                Text(vpn.isConnected ? "Protected" : "Not Connected")
+                    .font(.title2.bold())
+
+                Text(vpn.statusText)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            // Connect button
             Button(action: { vpn.toggle() }) {
-                Text(vpn.isConnected ? "Disconnect" : "Connect")
-                    .font(.headline)
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(vpn.isConnected ? Color.red : Color.blue)
-                    .cornerRadius(14)
+                HStack(spacing: 8) {
+                    Image(systemName: vpn.isConnected ? "stop.fill" : "play.fill")
+                        .font(.system(size: 14))
+                    Text(vpn.isConnected ? "Disconnect" : "Connect")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                .background(
+                    vpn.isConnected
+                        ? AnyShapeStyle(Color.red.gradient)
+                        : AnyShapeStyle(Color.blue.gradient)
+                )
+                .foregroundColor(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
         }
         .padding(24)
-        .background(Color(.secondarySystemGroupedBackground))
-        .cornerRadius(16)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(.quaternary, lineWidth: 0.5)
+        )
     }
 
-    // MARK: - Statistics Card
+    // MARK: - Stats Grid
 
-    private var statisticsCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Statistics")
-                .font(.headline)
-
-            LazyVGrid(columns: [
-                GridItem(.flexible()),
-                GridItem(.flexible()),
-            ], spacing: 10) {
-                statItem("Total Packets", value: "\(vpn.statistics.totalPackets)")
-                statItem("Modified", value: "\(vpn.statistics.modifiedPackets)")
-                statItem("HTTP Modified", value: "\(vpn.statistics.httpModified)")
-                statItem("HTTPS Fragmented", value: "\(vpn.statistics.httpsFragmented)")
-                statItem("DNS Redirected", value: "\(vpn.statistics.dnsRedirected)")
-                statItem("DPI Blocked", value: "\(vpn.statistics.passiveDPIBlocked)")
-            }
+    private var statsGrid: some View {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+            statCell("Packets", value: formatNumber(vpn.statistics.totalPackets), icon: "arrow.up.arrow.down", color: .blue)
+            statCell("Modified", value: formatNumber(vpn.statistics.modifiedPackets), icon: "wand.and.stars", color: .purple)
+            statCell("Blocked", value: formatNumber(vpn.statistics.passiveDPIBlocked), icon: "hand.raised.fill", color: .red)
+            statCell("HTTP", value: formatNumber(vpn.statistics.httpModified), icon: "globe", color: .orange)
+            statCell("HTTPS", value: formatNumber(vpn.statistics.httpsFragmented), icon: "lock.shield", color: .green)
+            statCell("Conns", value: "\(vpn.statistics.activeConnections)", icon: "point.3.connected.trianglepath.dotted", color: .teal)
         }
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .cornerRadius(16)
     }
 
-    private func statItem(_ title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+    private func statCell(_ title: String, value: String, icon: String, color: Color) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 16))
+                .foregroundStyle(color)
             Text(value)
-                .font(.title3.bold())
-                .foregroundColor(.blue)
+                .font(.system(.title3, design: .rounded).bold())
+                .foregroundStyle(.primary)
             Text(title)
-                .font(.caption)
-                .foregroundColor(.secondary)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(Color(.tertiarySystemGroupedBackground))
-        .cornerRadius(8)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     // MARK: - Presets
 
-    private var presetsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Quick Presets")
-                .font(.headline)
+    private var presetsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Presets", systemImage: "bolt.horizontal.fill")
+                .font(.subheadline.bold())
+                .foregroundStyle(.secondary)
 
             HStack(spacing: 10) {
                 ForEach(DPIConfiguration.Preset.allCases, id: \.self) { preset in
                     if preset != .custom {
-                        presetButton(preset)
+                        presetChip(preset)
                     }
                 }
             }
         }
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .cornerRadius(16)
+        .padding(16)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
-    private func presetButton(_ preset: DPIConfiguration.Preset) -> some View {
-        Button(action: { vpn.applyPreset(preset) }) {
-            VStack(spacing: 4) {
+    private func presetChip(_ preset: DPIConfiguration.Preset) -> some View {
+        let isActive = vpn.config.activePreset == preset
+        return Button(action: { vpn.applyPreset(preset) }) {
+            VStack(spacing: 6) {
                 Image(systemName: presetIcon(preset))
-                    .font(.title2)
+                    .font(.system(size: 20))
                 Text(preset.rawValue)
                     .font(.caption.bold())
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
-            .background(vpn.config.activePreset == preset ? Color.blue : Color(.tertiarySystemGroupedBackground))
-            .foregroundColor(vpn.config.activePreset == preset ? .white : .primary)
-            .cornerRadius(10)
+            .padding(.vertical, 14)
+            .background(
+                isActive
+                    ? AnyShapeStyle(Color.blue.gradient)
+                    : AnyShapeStyle(Color(.tertiarySystemGroupedBackground))
+            )
+            .foregroundStyle(isActive ? .white : .primary)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
     }
 
-    private func presetIcon(_ preset: DPIConfiguration.Preset) -> String {
-        switch preset {
+    private func presetIcon(_ p: DPIConfiguration.Preset) -> String {
+        switch p {
         case .minimal: return "shield"
         case .balanced: return "shield.lefthalf.filled"
         case .maximum: return "shield.checkered"
@@ -153,24 +211,34 @@ struct MainView: View {
         }
     }
 
-    // MARK: - Settings Row
+    // MARK: - Menu Row
 
-    private func settingsRow(icon: String, title: String, subtitle: String) -> some View {
+    private func menuRow(icon: String, iconColor: Color, title: String, subtitle: String) -> some View {
         HStack(spacing: 14) {
             Image(systemName: icon)
-                .font(.title2)
-                .foregroundColor(.blue)
-                .frame(width: 36)
-            VStack(alignment: .leading) {
-                Text(title).font(.body.bold())
-                Text(subtitle).font(.caption).foregroundColor(.secondary)
+                .font(.system(size: 18))
+                .foregroundStyle(iconColor)
+                .frame(width: 36, height: 36)
+                .background(iconColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.body.weight(.medium))
+                Text(subtitle).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
             Image(systemName: "chevron.right")
-                .foregroundColor(.secondary)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.quaternary)
         }
-        .padding()
-        .background(Color(.secondarySystemGroupedBackground))
-        .cornerRadius(16)
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    // MARK: - Helpers
+
+    private func formatNumber(_ n: UInt64) -> String {
+        if n >= 1_000_000 { return String(format: "%.1fM", Double(n)/1_000_000) }
+        if n >= 1_000 { return String(format: "%.1fK", Double(n)/1_000) }
+        return "\(n)"
     }
 }

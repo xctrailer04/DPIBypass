@@ -5,78 +5,80 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            // HTTP Tricks
-            Section(header: Text("HTTP Bypass (Port 80)")) {
-                Toggle("Host Header Replace (hoSt:)", isOn: $vpn.config.httpHostReplace)
-                Toggle("Host Mixed Case (tEsT.cOm)", isOn: $vpn.config.httpHostMixCase)
-                Toggle("Remove Space After Host:", isOn: $vpn.config.httpHostRemoveSpace)
-                Toggle("Additional Space After Method", isOn: $vpn.config.httpAdditionalSpace)
-
-                HStack {
-                    Text("Fragment Size")
-                    Spacer()
-                    Stepper("\(vpn.config.httpFragmentSize)", value: $vpn.config.httpFragmentSize, in: 0...100)
+            Section {
+                Toggle(isOn: $vpn.config.httpHostReplace) {
+                    Label("Host Header Replace", systemImage: "textformat.alt")
                 }
+                Toggle(isOn: $vpn.config.httpHostMixCase) {
+                    Label("Host Mixed Case", systemImage: "textformat.abc")
+                }
+                Toggle(isOn: $vpn.config.httpHostRemoveSpace) {
+                    Label("Remove Space After Host:", systemImage: "space")
+                }
+                Toggle(isOn: $vpn.config.httpAdditionalSpace) {
+                    Label("Extra Space After Method", systemImage: "plus.square")
+                }
+                Stepper("Fragment Size: \(vpn.config.httpFragmentSize)", value: $vpn.config.httpFragmentSize, in: 0...100)
+            } header: {
+                Label("HTTP Bypass (Port 80)", systemImage: "globe")
             }
 
-            // HTTPS/TLS Tricks
-            Section(header: Text("HTTPS/TLS Bypass (Port 443)")) {
-                Toggle("TLS Fragmentation", isOn: $vpn.config.httpsFragmentEnabled)
-                Toggle("Fragment by SNI", isOn: $vpn.config.fragmentBySNI)
-
+            Section {
+                Toggle(isOn: $vpn.config.httpsFragmentEnabled) {
+                    Label("TLS Fragmentation", systemImage: "lock.shield")
+                }
+                Toggle(isOn: $vpn.config.fragmentBySNI) {
+                    Label("Fragment by SNI", systemImage: "scissors")
+                }
                 if !vpn.config.fragmentBySNI {
-                    HStack {
-                        Text("Fragment Size")
-                        Spacer()
-                        Stepper("\(vpn.config.httpsFragmentSize)", value: $vpn.config.httpsFragmentSize, in: 1...100)
-                    }
+                    Stepper("Fragment Size: \(vpn.config.httpsFragmentSize)", value: $vpn.config.httpsFragmentSize, in: 1...100)
                 }
+            } header: {
+                Label("HTTPS/TLS Bypass (Port 443)", systemImage: "lock.fill")
             }
 
-            // Passive DPI
-            Section(header: Text("Passive DPI Blocking")) {
-                Toggle("Block DPI Redirects (302)", isOn: $vpn.config.blockPassiveDPI)
-                Toggle("Block QUIC (Force TCP)", isOn: $vpn.config.blockQUIC)
+            Section {
+                Toggle(isOn: $vpn.config.blockPassiveDPI) {
+                    Label("Block DPI Redirects", systemImage: "hand.raised")
+                }
+                Toggle(isOn: $vpn.config.blockQUIC) {
+                    Label("Block QUIC (Force TCP)", systemImage: "xmark.shield")
+                }
+            } header: {
+                Label("Passive DPI Blocking", systemImage: "shield.slash")
             }
 
-            // DNS
-            Section(header: Text("DNS")) {
-                Toggle("DNS Redirection", isOn: $vpn.config.dnsRedirectEnabled)
+            Section {
+                Toggle(isOn: $vpn.config.dnsRedirectEnabled) {
+                    Label("DNS Redirection", systemImage: "arrow.triangle.branch")
+                }
                 if vpn.config.dnsRedirectEnabled {
                     HStack {
-                        Text("DNS Server")
+                        Text("Server")
                         Spacer()
                         TextField("1.1.1.1", text: $vpn.config.dnsServer)
                             .multilineTextAlignment(.trailing)
                             .keyboardType(.decimalPad)
+                            .foregroundStyle(.blue)
                     }
                 }
+            } header: {
+                Label("DNS", systemImage: "network")
             }
 
-            // Window Size
-            Section(header: Text("Advanced")) {
-                Toggle("Window Size Manipulation", isOn: $vpn.config.windowSizeEnabled)
-                if vpn.config.windowSizeEnabled {
-                    HStack {
-                        Text("Window Size")
-                        Spacer()
-                        Stepper("\(vpn.config.windowSize)", value: $vpn.config.windowSize, in: 1...65535)
-                    }
-                }
-            }
-
-            // Save
             Section {
                 Button(action: { vpn.saveConfig() }) {
                     HStack {
                         Spacer()
-                        Text("Save & Apply")
-                            .bold()
+                        Label("Save & Apply", systemImage: "checkmark.circle.fill")
+                            .fontWeight(.semibold)
                         Spacer()
                     }
                 }
+                .tint(.blue)
             }
         }
         .navigationTitle("Settings")
+        .navigationBarTitleDisplayMode(.large)
     }
 }

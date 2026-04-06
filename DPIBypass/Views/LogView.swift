@@ -2,65 +2,66 @@ import SwiftUI
 
 struct LogView: View {
     @ObservedObject private var vpn = VPNManager.shared
-    @State private var logText: String = "Tap Refresh to load logs from tunnel..."
+    @State private var logText = "Tap refresh to load..."
     @State private var autoRefresh = false
-    @State private var showShareSheet = false
-    private let timer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
+    @State private var showShare = false
+    private let timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("\(logText.components(separatedBy: "\n").count) lines")
+            // Toolbar
+            HStack(spacing: 16) {
+                Label("\(logText.components(separatedBy: "\n").count)", systemImage: "line.3.horizontal")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
 
                 Spacer()
 
-                Toggle("Auto", isOn: $autoRefresh)
-                    .labelsHidden()
-                    .scaleEffect(0.8)
-                Text("Auto").font(.caption)
+                Toggle(isOn: $autoRefresh) {
+                    Image(systemName: "play.circle")
+                }
+                .toggleStyle(.button)
+                .tint(autoRefresh ? .green : .gray)
 
-                Button(action: fetchLogs) {
+                Button(action: fetch) {
                     Image(systemName: "arrow.clockwise")
                 }
-                Button(action: { showShareSheet = true }) {
+                Button(action: { showShare = true }) {
                     Image(systemName: "square.and.arrow.up")
                 }
             }
             .padding(.horizontal)
-            .padding(.vertical, 8)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial)
 
-            Divider()
-
+            // Log
             ScrollViewReader { proxy in
                 ScrollView {
                     Text(logText)
-                        .font(.system(.caption2, design: .monospaced))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.primary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                        .id("bottom")
+                        .padding(10)
+                        .id("end")
                 }
+                .background(Color(.systemBackground))
                 .onChange(of: logText) { _ in
-                    proxy.scrollTo("bottom", anchor: .bottom)
+                    if autoRefresh { proxy.scrollTo("end", anchor: .bottom) }
                 }
             }
         }
-        .navigationTitle("Debug Log")
-        .onAppear { fetchLogs() }
-        .onReceive(timer) { _ in
-            if autoRefresh { fetchLogs() }
-        }
-        .sheet(isPresented: $showShareSheet) {
+        .navigationTitle("Console")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { fetch() }
+        .onReceive(timer) { _ in if autoRefresh { fetch() } }
+        .sheet(isPresented: $showShare) {
             ShareSheet(text: logText)
         }
     }
 
-    private func fetchLogs() {
+    private func fetch() {
         vpn.fetchLogs { text in
-            DispatchQueue.main.async {
-                self.logText = text
-            }
+            DispatchQueue.main.async { logText = text }
         }
     }
 }
