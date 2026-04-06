@@ -87,6 +87,10 @@
 #define CHECKSUM_CHECK_TCP          1
 #define CHECKSUM_CHECK_UDP          1
 
+/* === Statistics (disabled — we excluded stats.c) === */
+#define LWIP_STATS                  0
+#define LWIP_STATS_DISPLAY          0
+
 /* === Debug (disable in release) === */
 #define LWIP_DEBUG                  0
 #define TCP_DEBUG                   LWIP_DBG_OFF

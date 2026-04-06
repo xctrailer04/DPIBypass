@@ -3,6 +3,12 @@
  * FULL IMPLEMENTATION — connects lwIP stack to NEPacketTunnelProvider
  */
 
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <sys/time.h>
+#include <stdint.h>
+
 #include "lwip/init.h"
 #include "lwip/tcp.h"
 #include "lwip/udp.h"
@@ -11,10 +17,17 @@
 #include "lwip/netif.h"
 #include "lwip/timeouts.h"
 #include "lwip/ip4_frag.h"
+#include "lwip/sys.h"
 
-#include <string.h>
-#include <stdlib.h>
-#include <stdio.h>
+// ============================================================================
+// sys_now() — required by lwIP for NO_SYS=1 timer management
+// ============================================================================
+
+u32_t sys_now(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (u32_t)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
+}
 
 // ============================================================================
 // Callback types (C → Swift)
