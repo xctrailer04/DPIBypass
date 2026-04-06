@@ -284,15 +284,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let dstPort = state.dstPort
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // Wait for connect
-            var writeSet = fd_set()
-            withUnsafeMutablePointer(to: &writeSet) { ptr in
-                __darwin_fd_zero(ptr)
-                __darwin_fd_set(fd, ptr)
-            }
-            var timeout = timeval(tv_sec: 5, tv_usec: 0)
-            let sel = select(fd + 1, nil, &writeSet, nil, &timeout)
-            if sel <= 0 {
+            // Wait for connect using poll()
+            var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            let pollResult = poll(&pfd, 1, 5000)  // 5 second timeout
+            if pollResult <= 0 {
                 self?.dlog("BSD CONNECT TIMEOUT: \(host):\(port)")
                 Darwin.close(fd)
                 return
