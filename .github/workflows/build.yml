@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14  # Free macOS runner with Xcode 15+
+    runs-on: macos-14
 
     steps:
     - uses: actions/checkout@v4
@@ -15,92 +15,64 @@ jobs:
     - name: Select Xcode
       run: sudo xcode-select -s /Applications/Xcode_15.4.app
 
+    - name: Install xcodegen
+      run: brew install xcodegen
+
     - name: Generate Xcode Project
       run: |
-        # Create Xcode project structure
-        cat > project.yml << 'ENDYML'
-name: DPIBypass
-options:
-  bundleIdPrefix: com.voiplet
-  deploymentTarget:
-    iOS: "15.0"
+        python3 -c "
+        content = '''name: DPIBypass
+        options:
+          bundleIdPrefix: com.voiplet
+          deploymentTarget:
+            iOS: \"15.0\"
 
-settings:
-  base:
-    DEVELOPMENT_TEAM: ""
-    CODE_SIGN_IDENTITY: ""
-    CODE_SIGNING_REQUIRED: "NO"
-    CODE_SIGNING_ALLOWED: "NO"
+        settings:
+          base:
+            DEVELOPMENT_TEAM: \"\"
+            CODE_SIGN_IDENTITY: \"\"
+            CODE_SIGNING_REQUIRED: \"NO\"
+            CODE_SIGNING_ALLOWED: \"NO\"
 
-targets:
-  DPIBypass:
-    type: application
-    platform: iOS
-    sources:
-      - DPIBypass/
-      - Shared/
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.voiplet.dpibypass
-        INFOPLIST_FILE: DPIBypass/App/Info.plist
-    entitlements:
-      path: DPIBypass/DPIBypass.entitlements
-    dependencies:
-      - target: PacketTunnelExtension
-        embed: true
+        targets:
+          DPIBypass:
+            type: application
+            platform: iOS
+            sources:
+              - DPIBypass/
+              - Shared/
+            settings:
+              base:
+                PRODUCT_BUNDLE_IDENTIFIER: com.voiplet.dpibypass
+                INFOPLIST_FILE: DPIBypass/App/Info.plist
+            entitlements:
+              path: DPIBypass/DPIBypass.entitlements
+            dependencies:
+              - target: PacketTunnelExtension
+                embed: true
 
-  PacketTunnelExtension:
-    type: app-extension
-    platform: iOS
-    sources:
-      - PacketTunnelExtension/
-      - Shared/
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.voiplet.dpibypass.tunnel
-        INFOPLIST_FILE: PacketTunnelExtension/Info.plist
-        HEADER_SEARCH_PATHS: "$(SRCROOT)/PacketTunnelExtension/lwip $(SRCROOT)/PacketTunnelExtension/lwip/lwip-src/src/include"
-        SWIFT_OBJC_BRIDGING_HEADER: PacketTunnelExtension/PacketTunnelExtension-Bridging-Header.h
-    entitlements:
-      path: PacketTunnelExtension/PacketTunnelExtension.entitlements
-ENDYML
-
-        brew install xcodegen
+          PacketTunnelExtension:
+            type: app-extension
+            platform: iOS
+            sources:
+              - PacketTunnelExtension/
+              - Shared/
+            settings:
+              base:
+                PRODUCT_BUNDLE_IDENTIFIER: com.voiplet.dpibypass.tunnel
+                INFOPLIST_FILE: PacketTunnelExtension/Info.plist
+                HEADER_SEARCH_PATHS:
+                  - \"\\$(SRCROOT)/PacketTunnelExtension/lwip\"
+                  - \"\\$(SRCROOT)/PacketTunnelExtension/lwip/lwip-src/src/include\"
+                SWIFT_OBJC_BRIDGING_HEADER: PacketTunnelExtension/PacketTunnelExtension-Bridging-Header.h
+            entitlements:
+              path: PacketTunnelExtension/PacketTunnelExtension.entitlements
+        '''
+        import textwrap
+        with open('project.yml', 'w') as f:
+            f.write(textwrap.dedent(content))
+        "
         xcodegen generate
-
-    - name: Create App Info.plist
-      run: |
-        mkdir -p DPIBypass/App
-        cat > DPIBypass/App/Info.plist << 'EOF'
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>CFBundleName</key>
-            <string>DPI Bypass</string>
-            <key>CFBundleDisplayName</key>
-            <string>DPI Bypass</string>
-            <key>CFBundleIdentifier</key>
-            <string>com.voiplet.dpibypass</string>
-            <key>CFBundleVersion</key>
-            <string>1</string>
-            <key>CFBundleShortVersionString</key>
-            <string>1.0.0</string>
-            <key>CFBundlePackageType</key>
-            <string>APPL</string>
-            <key>LSRequiresIPhoneOS</key>
-            <true/>
-            <key>UILaunchScreen</key>
-            <dict/>
-            <key>UISupportedInterfaceOrientations</key>
-            <array>
-                <string>UIInterfaceOrientationPortrait</string>
-            </array>
-            <key>MinimumOSVersion</key>
-            <string>15.0</string>
-        </dict>
-        </plist>
-        EOF
 
     - name: Build
       run: |
