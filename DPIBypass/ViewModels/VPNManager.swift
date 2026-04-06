@@ -179,6 +179,34 @@ class VPNManager: ObservableObject {
         }
     }
 
+    // MARK: - Logs (via IPC)
+
+    func fetchLogs(completion: @escaping (String) -> Void) {
+        guard let session = manager?.connection as? NETunnelProviderSession else {
+            completion("Tunnel not connected — no logs available")
+            return
+        }
+        let message = TunnelMessage.getLogs
+        guard let data = message.encode() else {
+            completion("Failed to encode message")
+            return
+        }
+
+        do {
+            try session.sendProviderMessage(data) { response in
+                guard let response = response,
+                      let msg = TunnelMessage.decode(from: response),
+                      case .logDump(let text) = msg else {
+                    completion("No response from tunnel (extension may not be running)")
+                    return
+                }
+                completion(text.isEmpty ? "Log buffer empty — tunnel running but no packets yet" : text)
+            }
+        } catch {
+            completion("IPC error: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Status Text
 
     var statusText: String {

@@ -8,11 +8,13 @@ public enum TunnelMessage: Codable {
     case updateConfiguration(DPIConfiguration)
     case startLogging
     case stopLogging
+    case getLogs
 
     // Extension → App
     case status(TunnelStatus)
     case statistics(TunnelStatistics)
     case logEntry(LogEntry)
+    case logDump(String)
 
     public func encode() -> Data? {
         try? JSONEncoder().encode(self)
