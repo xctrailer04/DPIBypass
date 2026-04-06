@@ -7,16 +7,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var logBuffer: [String] = []
     private var packetCount: UInt64 = 0
 
+    private var httpsFragCount: UInt64 = 0
+    private var httpModCount: UInt64 = 0
+
     // TCP state tracking
     private struct TCPState {
         var conn: NWTCPConnection?
-        var localSeq: UInt32 = arc4random()  // Our (fake server) initial seq
-        var remoteSeq: UInt32 = 0            // App's seq
+        var socketFD: Int32 = -1             // BSD socket for DPI bypass (TLS/HTTP first payload)
+        var localSeq: UInt32 = arc4random()
+        var remoteSeq: UInt32 = 0
         var connected: Bool = false
         var host: String
         var port: UInt16
         var firstPayload: Bool = true
-        // Original packet info for building responses
         var srcIP: (UInt8, UInt8, UInt8, UInt8) = (0,0,0,0)
         var dstIP: (UInt8, UInt8, UInt8, UInt8) = (0,0,0,0)
         var srcPort: UInt16 = 0
@@ -179,9 +182,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 let sni = TLSParser.extractSNI(from: pkt.payload)?.hostname ?? "?"
                 dlog("  TLS ClientHello SNI=\(sni)")
                 if config.httpsFragmentEnabled, let result = SNIFragmentation.fragment(payload: pkt.payload, config: config) {
-                    dlog("  SNI FRAG → \(result.fragments.count) parts")
-                    for frag in result.fragments {
-                        state.conn?.write(frag) { _ in }
+                    dlog("  SNI FRAG → \(result.fragments.count) parts for \(sni)")
+                    httpsFragCount += 1
+                    // Write fragments with small delay to prevent coalescing
+                    let frags = result.fragments
+                    if let conn = state.conn {
+                        for (i, frag) in frags.enumerated() {
+                            conn.write(frag) { [weak self] error in
+                                if let e = error { self?.dlog("  FRAG WRITE[\(i)] ERR: \(e)") }
+                                else { self?.dlog("  FRAG[\(i)] sent [\(frag.count)B]") }
+                            }
+                        }
                     }
                     state.firstPayload = false
                     tcpStates[key] = state
@@ -192,6 +203,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if state.firstPayload && pkt.dstPort == 80, let info = HTTPParser.parse(pkt.payload) {
                 dlog("  HTTP \(info.method) Host=\(info.hostValue)")
                 dataToSend = HTTPHostManipulation.apply(payload: pkt.payload, httpInfo: info, config: config)
+                httpModCount += 1
             }
 
             state.firstPayload = false
@@ -410,7 +422,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         switch msg {
         case .getStatus: completionHandler?(TunnelMessage.status(.connected).encode())
         case .getStatistics:
-            var s = TunnelStatistics(); s.totalPackets = packetCount; s.activeConnections = tcpStates.count
+            var s = TunnelStatistics()
+            s.totalPackets = packetCount
+            s.activeConnections = tcpStates.count
+            s.httpsFragmented = httpsFragCount
+            s.httpModified = httpModCount
+            s.modifiedPackets = httpsFragCount + httpModCount
             completionHandler?(TunnelMessage.statistics(s).encode())
         case .getLogs: completionHandler?(TunnelMessage.logDump(logBuffer.joined(separator: "\n")).encode())
         default: completionHandler?(nil)
