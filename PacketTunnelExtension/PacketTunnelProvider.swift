@@ -14,7 +14,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // TCP state tracking
     private struct TCPState {
         var conn: NWTCPConnection?
-        var socketFD: Int32 = -1             // BSD socket for DPI bypass (TLS/HTTP first payload)
+        var socketFD: Int32 = -1
+        var bsdConnected: Bool = false       // BSD socket connected?
+        var pendingData: [Data] = []         // Buffer until BSD connected
         var localSeq: UInt32 = arc4random()
         var remoteSeq: UInt32 = 0
         var connected: Bool = false
@@ -186,38 +188,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
             // BSD socket path (port 80/443)
             if state.socketFD >= 0 {
-                var sendData = pkt.payload
-
-                if state.firstPayload && pkt.dstPort == 443 && TLSParser.isClientHello(pkt.payload) {
-                    let sni = TLSParser.extractSNI(from: pkt.payload)?.hostname ?? "?"
-                    dlog("  TLS SNI=\(sni)")
-                    if config.httpsFragmentEnabled,
-                       let result = SNIFragmentation.fragment(payload: pkt.payload, config: config) {
-                        dlog("  SNI FRAG → \(result.fragments.count) parts")
-                        httpsFragCount += 1
-                        let fd = state.socketFD
-                        for (i, frag) in result.fragments.enumerated() {
-                            let b = [UInt8](frag)
-                            let sent = Darwin.send(fd, b, b.count, 0)
-                            dlog("  FRAG[\(i)] sent \(sent)/\(b.count)B")
-                            if i < result.fragments.count - 1 { usleep(1000) }
-                        }
-                        state.firstPayload = false
-                        tcpStates[key] = state
-                        return
-                    }
-                }
-
-                if state.firstPayload && pkt.dstPort == 80, let info = HTTPParser.parse(pkt.payload) {
-                    dlog("  HTTP Host=\(info.hostValue)")
-                    sendData = HTTPHostManipulation.apply(payload: pkt.payload, httpInfo: info, config: config)
-                    httpModCount += 1
-                }
-
-                state.firstPayload = false
+                // Buffer data until BSD socket is connected
+                state.pendingData.append(pkt.payload)
                 tcpStates[key] = state
-                let b = [UInt8](sendData)
-                Darwin.send(state.socketFD, b, b.count, 0)
+
+                if state.bsdConnected {
+                    flushPendingData(key: key)
+                }
+                // If not connected yet, data will be flushed when connectBSDSocket completes
                 return
             }
 
@@ -235,6 +213,50 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             state.conn?.cancel()
             tcpStates.removeValue(forKey: key)
         }
+    }
+
+    // MARK: - Flush pending data through BSD socket
+
+    private func flushPendingData(key: String) {
+        guard var state = tcpStates[key], state.bsdConnected, !state.pendingData.isEmpty else { return }
+        let fd = state.socketFD
+        let pending = state.pendingData
+        state.pendingData.removeAll()
+
+        for payload in pending {
+            if state.firstPayload && state.port == 443 && TLSParser.isClientHello(payload) {
+                let sni = TLSParser.extractSNI(from: payload)?.hostname ?? "?"
+                dlog("  TLS SNI=\(sni)")
+                if config.httpsFragmentEnabled,
+                   let result = SNIFragmentation.fragment(payload: payload, config: config) {
+                    dlog("  SNI FRAG → \(result.fragments.count) parts")
+                    httpsFragCount += 1
+                    for (i, frag) in result.fragments.enumerated() {
+                        let b = [UInt8](frag)
+                        let sent = Darwin.send(fd, b, b.count, 0)
+                        dlog("  FRAG[\(i)] sent \(sent)/\(b.count)B")
+                        if i < result.fragments.count - 1 { usleep(1000) }
+                    }
+                    state.firstPayload = false
+                    continue
+                }
+            }
+
+            if state.firstPayload && state.port == 80, let info = HTTPParser.parse(payload) {
+                dlog("  HTTP Host=\(info.hostValue)")
+                let modified = HTTPHostManipulation.apply(payload: payload, httpInfo: info, config: config)
+                httpModCount += 1
+                let b = [UInt8](modified)
+                Darwin.send(fd, b, b.count, 0)
+                state.firstPayload = false
+                continue
+            }
+
+            state.firstPayload = false
+            let b = [UInt8](payload)
+            Darwin.send(fd, b, b.count, 0)
+        }
+        tcpStates[key] = state
     }
 
     // MARK: - BSD Socket Connection (port 80/443)
@@ -303,6 +325,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
 
             self?.dlog("BSD CONNECTED: \(host):\(port)")
+
+            // Mark as connected and flush pending data
+            DispatchQueue.main.async {
+                let lookupKey = "\(srcIP.0).\(srcIP.1).\(srcIP.2).\(srcIP.3):\(srcPort)-\(host):\(port)"
+                if var s = self?.tcpStates[lookupKey] {
+                    s.bsdConnected = true
+                    self?.tcpStates[lookupKey] = s
+                    self?.flushPendingData(key: lookupKey)
+                }
+            }
 
             // Read loop
             var buf = [UInt8](repeating: 0, count: 65535)
