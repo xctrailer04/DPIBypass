@@ -71,6 +71,9 @@
 #define LWIP_HAVE_LOOPIF            0
 #define LWIP_NETIF_LOOPBACK         0
 #define PPP_SUPPORT                 0
+#define LWIP_PPP_API                0
+#define LWIP_ETHERNET               0
+#define LWIP_NUM_NETIF_CLIENT_DATA  0
 
 /* === API Configuration === */
 #define LWIP_CALLBACK_API           1
