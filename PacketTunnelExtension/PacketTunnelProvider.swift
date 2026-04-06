@@ -173,8 +173,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             removeTCPConnection(conn)
         case .cancelled:
             removeTCPConnection(conn)
-        case .waiting(let error):
-            dlog("TCP WAITING: \(conn.endpoint) err=\(error)")
+        case .waiting:
+            dlog("TCP WAITING: \(conn.endpoint)")
         default:
             break
         }
