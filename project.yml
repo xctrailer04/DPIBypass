@@ -1,0 +1,61 @@
+name: DPIBypass
+options:
+  bundleIdPrefix: com.voiplet
+  deploymentTarget:
+    iOS: "15.0"
+  xcodeVersion: "15.4"
+
+settings:
+  base:
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGNING_ALLOWED: "NO"
+
+targets:
+  DPIBypass:
+    type: application
+    platform: iOS
+    sources:
+      - DPIBypass/
+      - Shared/
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.voiplet.dpibypass
+        INFOPLIST_FILE: DPIBypass/App/Info.plist
+    entitlements:
+      path: DPIBypass/DPIBypass.entitlements
+    dependencies:
+      - target: PacketTunnelExtension
+        embed: true
+
+  PacketTunnelExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: PacketTunnelExtension/
+        excludes:
+          - "lwip/lwip-src/src/core/dns.c"
+          - "lwip/lwip-src/src/core/raw.c"
+          - "lwip/lwip-src/src/core/stats.c"
+          - "lwip/lwip-src/src/core/altcp.c"
+          - "lwip/lwip-src/src/core/altcp_alloc.c"
+          - "lwip/lwip-src/src/core/altcp_tcp.c"
+          - "lwip/lwip-src/src/core/ipv4/acd.c"
+          - "lwip/lwip-src/src/core/ipv4/autoip.c"
+          - "lwip/lwip-src/src/core/ipv4/dhcp.c"
+          - "lwip/lwip-src/src/core/ipv4/etharp.c"
+          - "lwip/lwip-src/src/core/ipv4/igmp.c"
+      - Shared/
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.voiplet.dpibypass.tunnel
+        INFOPLIST_FILE: PacketTunnelExtension/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: PacketTunnelExtension/PacketTunnelExtension-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/PacketTunnelExtension/lwip"
+          - "$(SRCROOT)/PacketTunnelExtension/lwip/lwip-src/src/include"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "LWIP_INCLUDED=1"
+    entitlements:
+      path: PacketTunnelExtension/PacketTunnelExtension.entitlements
