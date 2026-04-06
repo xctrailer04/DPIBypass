@@ -34,6 +34,18 @@ targets:
     sources:
       - path: PacketTunnelExtension/
         excludes:
+          - "lwip/lwip-src/.vscode/**"
+          - "lwip/lwip-src/.github/**"
+          - "lwip/lwip-src/CMakeLists.txt"
+          - "lwip/lwip-src/COPYING"
+          - "lwip/lwip-src/FEATURES"
+          - "lwip/lwip-src/FILES"
+          - "lwip/lwip-src/codespell_*.sh"
+          - "lwip/lwip-src/src/FILES"
+          - "lwip/lwip-src/src/Filelists.*"
+          - "lwip/lwip-src/src/include/compat/**"
+          - "lwip/lwip-src/src/include/netif/**"
+          - "lwip/lwip-src/src/include/lwip/apps/**"
           - "lwip/lwip-src/src/core/dns.c"
           - "lwip/lwip-src/src/core/raw.c"
           - "lwip/lwip-src/src/core/stats.c"
