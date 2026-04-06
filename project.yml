@@ -1,7 +1,7 @@
 name: DPIBypass
 options:
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "16.0"
 
 settings:
   base:
