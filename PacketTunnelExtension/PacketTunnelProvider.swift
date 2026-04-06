@@ -1,5 +1,6 @@
 import NetworkExtension
 import os.log
+import Darwin
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
 
@@ -178,32 +179,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // Forward to real server with DPI bypass
             var dataToSend = pkt.payload
 
-            if state.firstPayload && pkt.dstPort == 443 && TLSParser.isClientHello(pkt.payload) {
-                let sni = TLSParser.extractSNI(from: pkt.payload)?.hostname ?? "?"
-                dlog("  TLS ClientHello SNI=\(sni)")
-                if config.httpsFragmentEnabled, let result = SNIFragmentation.fragment(payload: pkt.payload, config: config) {
-                    dlog("  SNI FRAG → \(result.fragments.count) parts for \(sni)")
-                    httpsFragCount += 1
-                    // Write fragments with small delay to prevent coalescing
-                    let frags = result.fragments
-                    if let conn = state.conn {
-                        for (i, frag) in frags.enumerated() {
-                            conn.write(frag) { [weak self] error in
-                                if let e = error { self?.dlog("  FRAG WRITE[\(i)] ERR: \(e)") }
-                                else { self?.dlog("  FRAG[\(i)] sent [\(frag.count)B]") }
-                            }
-                        }
-                    }
-                    state.firstPayload = false
-                    tcpStates[key] = state
-                    return
-                }
-            }
-
-            if state.firstPayload && pkt.dstPort == 80, let info = HTTPParser.parse(pkt.payload) {
-                dlog("  HTTP \(info.method) Host=\(info.hostValue)")
-                dataToSend = HTTPHostManipulation.apply(payload: pkt.payload, httpInfo: info, config: config)
-                httpModCount += 1
+            if state.firstPayload && (pkt.dstPort == 443 || pkt.dstPort == 80) {
+                // Use BSD socket for first payload — guarantees real TCP fragmentation
+                // NWTCPConnection coalesces writes into single segment, defeating DPI bypass
+                state.firstPayload = false
+                tcpStates[key] = state
+                sendFirstPayloadViaBSDSocket(state: state, payload: pkt.payload, key: key)
+                return
             }
 
             state.firstPayload = false
@@ -219,6 +201,139 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             dlog("TCP FIN \(key)")
             state.conn?.cancel()
             tcpStates.removeValue(forKey: key)
+        }
+    }
+
+    // MARK: - BSD Socket DPI Bypass (real fragmentation)
+
+    /// Send first TLS/HTTP payload via BSD socket with TCP_NODELAY
+    /// Each send() = separate TCP segment = real fragmentation that DPI can't reassemble
+    private func sendFirstPayloadViaBSDSocket(state: TCPState, payload: Data, key: String) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+
+            let fd = Darwin.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+            guard fd >= 0 else {
+                self.dlog("BSD SOCKET FAILED errno=\(errno)")
+                // Fallback to NWTCPConnection
+                state.conn?.write(payload) { _ in }
+                return
+            }
+
+            // TCP_NODELAY = each send() is a separate TCP segment
+            var noDelay: Int32 = 1
+            Darwin.setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
+
+            // Bind to physical interface to bypass TUN
+            var ifindex = if_nametoindex("en0")
+            if ifindex == 0 { ifindex = if_nametoindex("pdp_ip0") }
+            if ifindex > 0 {
+                var idx = ifindex
+                Darwin.setsockopt(fd, IPPROTO_IP, IP_BOUND_IF, &idx, socklen_t(MemoryLayout<UInt32>.size))
+            }
+
+            // Connect (blocking for simplicity — we're on background queue)
+            var addr = sockaddr_in()
+            addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = state.port.bigEndian
+            inet_pton(AF_INET, state.host, &addr.sin_addr)
+
+            let result = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+
+            if result < 0 {
+                self.dlog("BSD CONNECT FAILED: \(state.host):\(state.port) errno=\(errno)")
+                Darwin.close(fd)
+                state.conn?.write(payload) { _ in }
+                return
+            }
+
+            self.dlog("BSD CONNECTED: \(state.host):\(state.port)")
+
+            // Now send with DPI bypass
+            let bytes = [UInt8](payload)
+
+            if state.port == 443 && TLSParser.isClientHello(payload) {
+                let sni = TLSParser.extractSNI(from: payload)?.hostname ?? "?"
+                self.dlog("  BSD TLS SNI=\(sni)")
+
+                if self.config.httpsFragmentEnabled,
+                   let result = SNIFragmentation.fragment(payload: payload, config: self.config) {
+                    self.dlog("  BSD SNI FRAG → \(result.fragments.count) parts")
+                    self.httpsFragCount += 1
+
+                    for (i, frag) in result.fragments.enumerated() {
+                        let fragBytes = [UInt8](frag)
+                        let sent = Darwin.send(fd, fragBytes, fragBytes.count, 0)
+                        self.dlog("  BSD FRAG[\(i)] sent \(sent)/\(fragBytes.count)B")
+                        // Small delay to ensure segments go out separately
+                        usleep(1000)  // 1ms
+                    }
+                } else {
+                    Darwin.send(fd, bytes, bytes.count, 0)
+                }
+            } else if state.port == 80, let info = HTTPParser.parse(payload) {
+                self.dlog("  BSD HTTP Host=\(info.hostValue)")
+                let modified = HTTPHostManipulation.apply(payload: payload, httpInfo: info, config: self.config)
+                let modBytes = [UInt8](modified)
+                Darwin.send(fd, modBytes, modBytes.count, 0)
+                self.httpModCount += 1
+            } else {
+                Darwin.send(fd, bytes, bytes.count, 0)
+            }
+
+            // Read response from BSD socket and forward to NWTCPConnection read path
+            // Actually, we need to read from this socket and write back to TUN
+            // But NWTCPConnection is already handling reads for this host:port
+            // So we just read the first response here and close the BSD socket
+            var buf = [UInt8](repeating: 0, count: 65535)
+            let bytesRead = Darwin.recv(fd, &buf, buf.count, 0)
+            if bytesRead > 0 {
+                self.dlog("BSD RECV: \(state.host):\(state.port) [\(bytesRead)B]")
+                // Write response back to TUN for the app
+                let responseData = Data(buf[0..<bytesRead])
+                DispatchQueue.main.async {
+                    self.sendDataToAppDirect(state: state, data: responseData)
+                }
+            }
+
+            Darwin.close(fd)
+            self.dlog("BSD SOCKET CLOSED: \(state.host):\(state.port)")
+        }
+    }
+
+    /// Write data to TUN directly (used by BSD socket path)
+    private func sendDataToAppDirect(state: TCPState, data: Data) {
+        // Find the state and update seq
+        for (key, var s) in tcpStates {
+            if s.host == state.host && s.port == state.port && s.srcPort == state.srcPort {
+                let mss = 1400
+                var offset = 0
+                var packets: [Data] = []
+                while offset < data.count {
+                    let end = min(offset + mss, data.count)
+                    let chunk = data[offset..<end]
+                    let isLast = end >= data.count
+                    let flags: UInt8 = isLast ? (TCPHeader.ACK | TCPHeader.PSH) : TCPHeader.ACK
+                    let pkt = buildTCPPacket(
+                        srcIP: s.dstIP, dstIP: s.srcIP,
+                        srcPort: s.dstPort, dstPort: s.srcPort,
+                        seq: s.localSeq, ack: s.remoteSeq,
+                        flags: flags, payload: Data(chunk)
+                    )
+                    s.localSeq &+= UInt32(chunk.count)
+                    packets.append(pkt)
+                    offset = end
+                }
+                tcpStates[key] = s
+                packetFlow.writePackets(packets, withProtocols: packets.map { _ in NSNumber(value: AF_INET) })
+                dlog("BSD→APP: \(key) [\(data.count)B] \(packets.count) segs")
+                return
+            }
         }
     }
 
