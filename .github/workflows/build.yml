@@ -48,7 +48,9 @@ jobs:
           archive \
           CODE_SIGN_IDENTITY="" \
           CODE_SIGNING_REQUIRED=NO \
-          CODE_SIGNING_ALLOWED=NO
+          CODE_SIGNING_ALLOWED=NO \
+          'HEADER_SEARCH_PATHS=$(inherited) $(SRCROOT)/PacketTunnelExtension/lwip $(SRCROOT)/PacketTunnelExtension/lwip/lwip-src/src/include' \
+          GCC_WARN_INHIBIT_ALL_WARNINGS=YES
 
     - name: Create IPA
       run: |
