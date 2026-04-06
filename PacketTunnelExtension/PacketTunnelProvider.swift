@@ -1,28 +1,29 @@
 import NetworkExtension
 import os.log
 
-/// PacketTunnelProvider with fake DNS approach to capture TCP traffic
-///
-/// How it works (same as Surge/Shadowrocket):
-/// 1. DNS queries come through TUN → we resolve them ourselves
-/// 2. We return a FAKE IP (198.18.x.x) to the app instead of real IP
-/// 3. App connects to fake IP via TCP → TCP SYN comes through TUN (because route matches)
-/// 4. We map fake IP back to real hostname → create real connection
-/// 5. Proxy data between TUN TCP and real connection with DPI bypass
 class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private var config = DPIConfiguration()
     private var logBuffer: [String] = []
     private var packetCount: UInt64 = 0
 
-    // Fake DNS: maps fake IP → real hostname
-    private var fakeIPToHost: [String: String] = [:]
-    private var hostToFakeIP: [String: String] = [:]
-    private var nextFakeIP: UInt32 = 0xC6120001 // 198.18.0.1
+    // TCP state tracking
+    private struct TCPState {
+        var conn: NWTCPConnection?
+        var localSeq: UInt32 = arc4random()  // Our (fake server) initial seq
+        var remoteSeq: UInt32 = 0            // App's seq
+        var connected: Bool = false
+        var host: String
+        var port: UInt16
+        var firstPayload: Bool = true
+        // Original packet info for building responses
+        var srcIP: (UInt8, UInt8, UInt8, UInt8) = (0,0,0,0)
+        var dstIP: (UInt8, UInt8, UInt8, UInt8) = (0,0,0,0)
+        var srcPort: UInt16 = 0
+        var dstPort: UInt16 = 0
+    }
 
-    // TCP connections
-    private var tcpConnections: [String: NWTCPConnection] = [:]
-    // UDP sessions
+    private var tcpStates: [String: TCPState] = [:]
     private var udpSessions: [String: NWUDPSession] = [:]
 
     private func dlog(_ msg: String) {
@@ -39,25 +40,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         config = DPIConfiguration.load()
 
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "198.18.0.0")
-
-        // TUN interface IP
         let ipv4 = NEIPv4Settings(addresses: ["198.18.0.1"], subnetMasks: ["255.255.0.0"])
-
-        // Route 198.18.0.0/16 through TUN — this is our fake IP range
-        // Also route 0.0.0.0/0 for UDP (DNS etc)
-        ipv4.includedRoutes = [
-            NEIPv4Route.default(),  // All traffic
-        ]
-        // Exclude the fake DNS range from going back to TUN recursively
+        ipv4.includedRoutes = [NEIPv4Route.default()]
         settings.ipv4Settings = ipv4
-
-        // DNS — point to our TUN IP so DNS queries come to us
         let dns = NEDNSSettings(servers: ["198.18.0.1"])
         dns.matchDomains = [""]
         settings.dnsSettings = dns
-
         settings.mtu = 1500
-        dlog("Settings: fakeIP range=198.18.0.0/16, DNS=198.18.0.1")
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             if let error = error {
@@ -72,8 +61,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
-        dlog("TUNNEL STOP pkts=\(packetCount)")
-        for c in tcpConnections.values { c.cancel() }
+        dlog("STOP pkts=\(packetCount)")
+        for s in tcpStates.values { s.conn?.cancel() }
         for s in udpSessions.values { s.cancel() }
         completionHandler()
     }
@@ -83,9 +72,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func startReading() {
         packetFlow.readPackets { [weak self] packets, protocols in
             guard let self = self else { return }
-            for (i, data) in packets.enumerated() {
-                self.processPacket(data, proto: protocols[i])
-            }
+            for (i, data) in packets.enumerated() { self.processPacket(data, proto: protocols[i]) }
             self.startReading()
         }
     }
@@ -109,240 +96,266 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             dlog("#\(packetCount) \(p) \(srcStr):\(pkt.srcPort)→\(dstStr):\(pkt.dstPort) \(flags) [\(data.count)B] pay=\(pkt.payload.count)")
         }
 
-        // DNS query to our fake DNS server (198.18.0.1 port 53)
+        // DNS
         if pkt.isUDP && pkt.dstPort == 53 {
-            handleDNSQuery(pkt, rawPacket: data)
+            handleDNS(pkt)
             return
         }
 
-        // ALL TCP traffic — proxy to real network
+        // TCP
         if pkt.isTCP {
-            handleTCPPacket(pkt, rawPacket: data, dstStr: dstStr)
+            handleTCP(pkt, dstStr: dstStr)
             return
         }
 
-        // UDP to real destinations (non-DNS)
+        // Other UDP
         if pkt.isUDP && !pkt.payload.isEmpty && pkt.dstPort != 53 {
             handleUDP(pkt, dstStr: dstStr)
-            return
         }
     }
 
-    // MARK: - Fake DNS
+    // MARK: - TCP with handshake simulation
 
-    private func handleDNSQuery(_ pkt: ParsedPacket, rawPacket: Data) {
-        guard pkt.payload.count >= 12 else { return }
-        let payload = [UInt8](pkt.payload)
-
-        // Parse DNS query to get hostname
-        guard let hostname = parseDNSQueryHostname(payload) else {
-            dlog("DNS: can't parse query")
-            // Forward to real DNS
-            forwardDNSToReal(pkt, rawPacket: rawPacket)
-            return
-        }
-
-        dlog("DNS QUERY: \(hostname)")
-
-        // Resolve via real DNS
-        let endpoint = NWHostEndpoint(hostname: config.dnsServer, port: "53")
-        let session = createUDPSession(to: endpoint, from: nil)
-
-        session.writeDatagram(pkt.payload) { [weak self] error in
-            if let error = error {
-                self?.dlog("DNS FWD ERROR: \(error)")
-                session.cancel()
-                return
-            }
-        }
-
-        session.setReadHandler({ [weak self] datagrams, error in
-            guard let self = self, let datagrams = datagrams, let response = datagrams.first else {
-                session.cancel()
-                return
-            }
-
-            self.dlog("DNS RESPONSE for \(hostname): \(response.count)B")
-
-            // Build DNS response packet and write back to TUN
-            let responsePacket = self.buildDNSResponsePacket(
-                originalPacket: pkt,
-                dnsResponse: response
-            )
-            if let responsePacket = responsePacket {
-                self.packetFlow.writePackets([responsePacket], withProtocols: [NSNumber(value: AF_INET)])
-            }
-
-            session.cancel()
-        }, maxDatagrams: 1)
-    }
-
-    private func forwardDNSToReal(_ pkt: ParsedPacket, rawPacket: Data) {
-        let endpoint = NWHostEndpoint(hostname: config.dnsServer, port: "53")
-        let session = createUDPSession(to: endpoint, from: nil)
-
-        session.writeDatagram(pkt.payload) { _ in }
-        session.setReadHandler({ [weak self] datagrams, _ in
-            guard let self = self, let dg = datagrams?.first else { session.cancel(); return }
-            if let resp = self.buildDNSResponsePacket(originalPacket: pkt, dnsResponse: dg) {
-                self.packetFlow.writePackets([resp], withProtocols: [NSNumber(value: AF_INET)])
-            }
-            session.cancel()
-        }, maxDatagrams: 1)
-    }
-
-    /// Build a raw IP/UDP packet containing the DNS response
-    private func buildDNSResponsePacket(originalPacket pkt: ParsedPacket, dnsResponse: Data) -> Data? {
-        // Swap src/dst from original query
-        let srcIP = pkt.ipHeader.dstIP  // DNS server → becomes source
-        let dstIP = pkt.ipHeader.srcIP  // Client → becomes dest
-        let srcPort = pkt.dstPort       // 53
-        let dstPort = pkt.srcPort       // Client's port
-
-        let udpLen = UInt16(8 + dnsResponse.count)
-        let totalLen = UInt16(20 + 8 + dnsResponse.count)
-
-        var packet = Data(count: Int(totalLen))
-
-        // IP Header (20 bytes)
-        packet[0] = 0x45  // Version 4, IHL 5
-        packet[1] = 0x00  // DSCP
-        packet[2] = UInt8(totalLen >> 8)
-        packet[3] = UInt8(totalLen & 0xFF)
-        packet[4] = 0x00; packet[5] = 0x00  // ID
-        packet[6] = 0x40; packet[7] = 0x00  // Don't fragment
-        packet[8] = 64    // TTL
-        packet[9] = 17    // UDP
-        packet[10] = 0; packet[11] = 0  // Checksum (calculated later)
-        packet[12] = srcIP.0; packet[13] = srcIP.1; packet[14] = srcIP.2; packet[15] = srcIP.3
-        packet[16] = dstIP.0; packet[17] = dstIP.1; packet[18] = dstIP.2; packet[19] = dstIP.3
-
-        // UDP Header (8 bytes)
-        packet[20] = UInt8(srcPort >> 8); packet[21] = UInt8(srcPort & 0xFF)
-        packet[22] = UInt8(dstPort >> 8); packet[23] = UInt8(dstPort & 0xFF)
-        packet[24] = UInt8(udpLen >> 8); packet[25] = UInt8(udpLen & 0xFF)
-        packet[26] = 0; packet[27] = 0  // UDP checksum (optional for IPv4)
-
-        // DNS payload
-        packet.replaceSubrange(28..<Int(totalLen), with: dnsResponse)
-
-        // IP checksum
-        ChecksumCalculator.ipChecksum(&packet)
-
-        return packet
-    }
-
-    /// Parse hostname from DNS query payload
-    private func parseDNSQueryHostname(_ data: [UInt8]) -> String? {
-        guard data.count >= 12 else { return nil }
-        // Skip header (12 bytes), read QNAME
-        var offset = 12
-        var parts: [String] = []
-        while offset < data.count {
-            let len = Int(data[offset])
-            if len == 0 { break }
-            offset += 1
-            guard offset + len <= data.count else { return nil }
-            if let part = String(bytes: data[offset..<offset+len], encoding: .ascii) {
-                parts.append(part)
-            }
-            offset += len
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: ".")
-    }
-
-    // MARK: - TCP Proxy
-
-    private func handleTCPPacket(_ pkt: ParsedPacket, rawPacket: Data, dstStr: String) {
+    private func handleTCP(_ pkt: ParsedPacket, dstStr: String) {
         guard let tcp = pkt.tcpHeader else { return }
+        let key = "\(pkt.ipHeader.srcIP.0).\(pkt.ipHeader.srcIP.1).\(pkt.ipHeader.srcIP.2).\(pkt.ipHeader.srcIP.3):\(pkt.srcPort)-\(dstStr):\(pkt.dstPort)"
 
-        let host = fakeIPToHost[dstStr] ?? dstStr  // Try fake IP lookup, fallback to real IP
-        let port = pkt.dstPort
-        let key = "\(dstStr):\(port)"
-
+        // SYN — new connection
         if tcp.isSYN && !tcp.isACK {
-            dlog("TCP SYN → \(dstStr) (host=\(host)):\(port)")
-            ensureTCPConnection(key: key, host: host, port: port)
+            dlog("TCP SYN → \(dstStr):\(pkt.dstPort)")
+
+            var state = TCPState(host: dstStr, port: pkt.dstPort)
+            state.remoteSeq = tcp.seqNumber &+ 1  // After SYN, seq advances by 1
+            state.srcIP = pkt.ipHeader.srcIP
+            state.dstIP = pkt.ipHeader.dstIP
+            state.srcPort = pkt.srcPort
+            state.dstPort = pkt.dstPort
+
+            // Send SYN+ACK back to app
+            let synack = buildTCPPacket(
+                srcIP: state.dstIP, dstIP: state.srcIP,
+                srcPort: state.dstPort, dstPort: state.srcPort,
+                seq: state.localSeq, ack: state.remoteSeq,
+                flags: TCPHeader.SYN | TCPHeader.ACK,
+                payload: Data()
+            )
+            state.localSeq &+= 1  // SYN consumes 1 seq
+            packetFlow.writePackets([synack], withProtocols: [NSNumber(value: AF_INET)])
+            dlog("  → SYN+ACK sent to app")
+
+            // Connect to real server
+            let endpoint = NWHostEndpoint(hostname: dstStr, port: "\(pkt.dstPort)")
+            let conn = createTCPConnection(to: endpoint, enableTLS: false, tlsParameters: nil, delegate: nil)
+            state.conn = conn
+            tcpStates[key] = state
+
+            conn.addObserver(self, forKeyPath: "state", options: [.new], context: nil)
+            return
         }
 
-        if !pkt.payload.isEmpty {
-            guard let conn = tcpConnections[key] else { return }
+        // ACK (handshake completion or data ack)
+        guard var state = tcpStates[key] else { return }
 
-            // Apply DPI bypass on first payload
+        // Data packet
+        if !pkt.payload.isEmpty {
+            state.remoteSeq = tcp.seqNumber &+ UInt32(pkt.payload.count)
+            tcpStates[key] = state
+
+            // Send ACK back to app
+            let ack = buildTCPPacket(
+                srcIP: state.dstIP, dstIP: state.srcIP,
+                srcPort: state.dstPort, dstPort: state.srcPort,
+                seq: state.localSeq, ack: state.remoteSeq,
+                flags: TCPHeader.ACK,
+                payload: Data()
+            )
+            packetFlow.writePackets([ack], withProtocols: [NSNumber(value: AF_INET)])
+
+            // Forward to real server with DPI bypass
             var dataToSend = pkt.payload
 
-            if port == 443 && TLSParser.isClientHello(pkt.payload) {
+            if state.firstPayload && pkt.dstPort == 443 && TLSParser.isClientHello(pkt.payload) {
                 let sni = TLSParser.extractSNI(from: pkt.payload)?.hostname ?? "?"
                 dlog("  TLS ClientHello SNI=\(sni)")
-
-                if config.httpsFragmentEnabled {
-                    if let result = SNIFragmentation.fragment(payload: pkt.payload, config: config) {
-                        dlog("  SNI FRAG → \(result.fragments.count) parts")
-                        for frag in result.fragments {
-                            conn.write(frag) { _ in }
-                        }
-                        return
+                if config.httpsFragmentEnabled, let result = SNIFragmentation.fragment(payload: pkt.payload, config: config) {
+                    dlog("  SNI FRAG → \(result.fragments.count) parts")
+                    for frag in result.fragments {
+                        state.conn?.write(frag) { _ in }
                     }
+                    state.firstPayload = false
+                    tcpStates[key] = state
+                    return
                 }
             }
 
-            if port == 80, let info = HTTPParser.parse(pkt.payload) {
+            if state.firstPayload && pkt.dstPort == 80, let info = HTTPParser.parse(pkt.payload) {
                 dlog("  HTTP \(info.method) Host=\(info.hostValue)")
                 dataToSend = HTTPHostManipulation.apply(payload: pkt.payload, httpInfo: info, config: config)
             }
 
-            conn.write(dataToSend) { [weak self] error in
-                if let e = error { self?.dlog("TCP WRITE ERR: \(key) \(e)") }
+            state.firstPayload = false
+            tcpStates[key] = state
+
+            state.conn?.write(dataToSend) { [weak self] error in
+                if let e = error { self?.dlog("TCP WRITE ERR: \(e)") }
             }
+        }
+
+        // FIN
+        if tcp.isFIN {
+            dlog("TCP FIN \(key)")
+            state.conn?.cancel()
+            tcpStates.removeValue(forKey: key)
         }
     }
 
-    private func ensureTCPConnection(key: String, host: String, port: UInt16) {
-        guard tcpConnections[key] == nil else { return }
-        guard tcpConnections.count < 200 else { dlog("TCP MAX"); return }
-
-        let endpoint = NWHostEndpoint(hostname: host, port: "\(port)")
-        let conn = createTCPConnection(to: endpoint, enableTLS: false, tlsParameters: nil, delegate: nil)
-        tcpConnections[key] = conn
-        dlog("TCP NEW: \(key) → \(host):\(port)")
-
-        conn.addObserver(self, forKeyPath: "state", options: [.new], context: nil)
-    }
-
+    // TCP state observation
     override func observeValue(forKeyPath keyPath: String?, of object: Any?,
                                 change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
         guard let conn = object as? NWTCPConnection else { return }
         switch conn.state {
         case .connected:
-            dlog("TCP CONNECTED: \(conn.endpoint)")
+            dlog("TCP REAL CONNECTED: \(conn.endpoint)")
             startTCPReading(conn)
         case .disconnected:
-            dlog("TCP DISCONNECTED: \(conn.endpoint)")
-            removeTCP(conn)
+            dlog("TCP REAL DISCONN: \(conn.endpoint)")
+            conn.removeObserver(self, forKeyPath: "state")
         case .cancelled:
-            removeTCP(conn)
-        case .waiting:
-            dlog("TCP WAITING: \(conn.endpoint)")
+            conn.removeObserver(self, forKeyPath: "state")
         default: break
         }
     }
 
     private func startTCPReading(_ conn: NWTCPConnection) {
         conn.readMinimumLength(1, maximumLength: 65535) { [weak self] data, error in
+            guard let self = self else { return }
             if let data = data, !data.isEmpty {
-                self?.dlog("TCP RECV: \(conn.endpoint) [\(data.count)B]")
-                // Response goes back to app through the connection itself
-                // createTCPConnection handles routing responses back
+                self.dlog("TCP REAL RECV: \(conn.endpoint) [\(data.count)B]")
+                // Find the state for this connection and send data back to app via TUN
+                self.sendDataToApp(from: conn, data: data)
             }
             if error == nil {
-                self?.startTCPReading(conn)
+                self.startTCPReading(conn)
             }
         }
     }
 
-    private func removeTCP(_ conn: NWTCPConnection) {
-        conn.removeObserver(self, forKeyPath: "state")
-        tcpConnections = tcpConnections.filter { $0.value !== conn }
+    /// Send server response back to app via TUN as TCP packets
+    private func sendDataToApp(from conn: NWTCPConnection, data: Data) {
+        // Find which state this connection belongs to
+        for (key, var state) in tcpStates {
+            if state.conn === conn {
+                // Build TCP data packet: server → app
+                let packet = buildTCPPacket(
+                    srcIP: state.dstIP, dstIP: state.srcIP,
+                    srcPort: state.dstPort, dstPort: state.srcPort,
+                    seq: state.localSeq, ack: state.remoteSeq,
+                    flags: TCPHeader.ACK | TCPHeader.PSH,
+                    payload: data
+                )
+                state.localSeq &+= UInt32(data.count)
+                tcpStates[key] = state
+
+                packetFlow.writePackets([packet], withProtocols: [NSNumber(value: AF_INET)])
+                dlog("TCP→APP: \(key) [\(data.count)B]")
+                return
+            }
+        }
+    }
+
+    // MARK: - Build TCP Packet
+
+    private func buildTCPPacket(srcIP: (UInt8,UInt8,UInt8,UInt8), dstIP: (UInt8,UInt8,UInt8,UInt8),
+                                 srcPort: UInt16, dstPort: UInt16,
+                                 seq: UInt32, ack: UInt32,
+                                 flags: UInt8, payload: Data) -> Data {
+        let tcpHeaderLen = 20
+        let ipHeaderLen = 20
+        let totalLen = ipHeaderLen + tcpHeaderLen + payload.count
+
+        var pkt = Data(count: totalLen)
+
+        // IP header
+        pkt[0] = 0x45
+        pkt[2] = UInt8((totalLen >> 8) & 0xFF)
+        pkt[3] = UInt8(totalLen & 0xFF)
+        pkt[6] = 0x40  // Don't fragment
+        pkt[8] = 64    // TTL
+        pkt[9] = 6     // TCP
+        pkt[12] = srcIP.0; pkt[13] = srcIP.1; pkt[14] = srcIP.2; pkt[15] = srcIP.3
+        pkt[16] = dstIP.0; pkt[17] = dstIP.1; pkt[18] = dstIP.2; pkt[19] = dstIP.3
+
+        // TCP header
+        let t = ipHeaderLen
+        pkt[t]   = UInt8(srcPort >> 8); pkt[t+1] = UInt8(srcPort & 0xFF)
+        pkt[t+2] = UInt8(dstPort >> 8); pkt[t+3] = UInt8(dstPort & 0xFF)
+        pkt[t+4] = UInt8((seq >> 24) & 0xFF); pkt[t+5] = UInt8((seq >> 16) & 0xFF)
+        pkt[t+6] = UInt8((seq >> 8) & 0xFF); pkt[t+7] = UInt8(seq & 0xFF)
+        pkt[t+8] = UInt8((ack >> 24) & 0xFF); pkt[t+9] = UInt8((ack >> 16) & 0xFF)
+        pkt[t+10] = UInt8((ack >> 8) & 0xFF); pkt[t+11] = UInt8(ack & 0xFF)
+        pkt[t+12] = 0x50  // Data offset: 5 words (20 bytes)
+        pkt[t+13] = flags
+        pkt[t+14] = 0xFF; pkt[t+15] = 0xFF  // Window size: 65535
+
+        // Payload
+        if !payload.isEmpty {
+            pkt.replaceSubrange((ipHeaderLen + tcpHeaderLen)..<totalLen, with: payload)
+        }
+
+        // Checksums
+        ChecksumCalculator.recalculateChecksums(&pkt)
+        return pkt
+    }
+
+    // MARK: - DNS
+
+    private func handleDNS(_ pkt: ParsedPacket) {
+        guard pkt.payload.count >= 12 else { return }
+        let payload = [UInt8](pkt.payload)
+        let hostname = parseDNSHostname(payload)
+        if let h = hostname { dlog("DNS: \(h)") }
+
+        let endpoint = NWHostEndpoint(hostname: config.dnsServer, port: "53")
+        let session = createUDPSession(to: endpoint, from: nil)
+        session.writeDatagram(pkt.payload) { _ in }
+        session.setReadHandler({ [weak self] dgs, _ in
+            guard let self = self, let dg = dgs?.first else { session.cancel(); return }
+            if let h = hostname { self.dlog("DNS RESP: \(h) [\(dg.count)B]") }
+            if let resp = self.buildDNSResponse(original: pkt, dns: dg) {
+                self.packetFlow.writePackets([resp], withProtocols: [NSNumber(value: AF_INET)])
+            }
+            session.cancel()
+        }, maxDatagrams: 1)
+    }
+
+    private func buildDNSResponse(original pkt: ParsedPacket, dns: Data) -> Data? {
+        let srcIP = pkt.ipHeader.dstIP
+        let dstIP = pkt.ipHeader.srcIP
+        let totalLen = 20 + 8 + dns.count
+        var p = Data(count: totalLen)
+        p[0] = 0x45; p[2] = UInt8((totalLen>>8)&0xFF); p[3] = UInt8(totalLen&0xFF)
+        p[6] = 0x40; p[8] = 64; p[9] = 17
+        p[12]=srcIP.0; p[13]=srcIP.1; p[14]=srcIP.2; p[15]=srcIP.3
+        p[16]=dstIP.0; p[17]=dstIP.1; p[18]=dstIP.2; p[19]=dstIP.3
+        p[20]=UInt8(pkt.dstPort>>8); p[21]=UInt8(pkt.dstPort&0xFF)
+        p[22]=UInt8(pkt.srcPort>>8); p[23]=UInt8(pkt.srcPort&0xFF)
+        let udpLen = UInt16(8+dns.count)
+        p[24]=UInt8(udpLen>>8); p[25]=UInt8(udpLen&0xFF)
+        p.replaceSubrange(28..<totalLen, with: dns)
+        ChecksumCalculator.ipChecksum(&p)
+        return p
+    }
+
+    private func parseDNSHostname(_ data: [UInt8]) -> String? {
+        guard data.count >= 12 else { return nil }
+        var offset = 12; var parts: [String] = []
+        while offset < data.count {
+            let len = Int(data[offset]); if len == 0 { break }
+            offset += 1; guard offset+len <= data.count else { return nil }
+            if let s = String(bytes: data[offset..<offset+len], encoding: .ascii) { parts.append(s) }
+            offset += len
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: ".")
     }
 
     // MARK: - UDP
@@ -350,14 +363,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func handleUDP(_ pkt: ParsedPacket, dstStr: String) {
         let key = "\(dstStr):\(pkt.dstPort)"
         if udpSessions[key] == nil {
-            let endpoint = NWHostEndpoint(hostname: dstStr, port: "\(pkt.dstPort)")
-            let session = createUDPSession(to: endpoint, from: nil)
-            udpSessions[key] = session
-
-            session.setReadHandler({ [weak self] datagrams, _ in
-                if let dgs = datagrams {
-                    for dg in dgs { self?.dlog("UDP RECV: \(key) [\(dg.count)B]") }
-                }
+            let ep = NWHostEndpoint(hostname: dstStr, port: "\(pkt.dstPort)")
+            let s = createUDPSession(to: ep, from: nil)
+            udpSessions[key] = s
+            s.setReadHandler({ [weak self] dgs, _ in
+                if let dgs = dgs { for d in dgs { self?.dlog("UDP RECV: \(key) [\(d.count)B]") } }
             }, maxDatagrams: 64)
         }
         udpSessions[key]?.writeDatagram(pkt.payload) { _ in }
@@ -368,17 +378,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
         guard let msg = TunnelMessage.decode(from: messageData) else { completionHandler?(nil); return }
         switch msg {
-        case .getStatus:
-            completionHandler?(TunnelMessage.status(.connected).encode())
+        case .getStatus: completionHandler?(TunnelMessage.status(.connected).encode())
         case .getStatistics:
-            var s = TunnelStatistics()
-            s.totalPackets = packetCount
-            s.activeConnections = tcpConnections.count
+            var s = TunnelStatistics(); s.totalPackets = packetCount; s.activeConnections = tcpStates.count
             completionHandler?(TunnelMessage.statistics(s).encode())
-        case .getLogs:
-            completionHandler?(TunnelMessage.logDump(logBuffer.joined(separator: "\n")).encode())
-        default:
-            completionHandler?(nil)
+        case .getLogs: completionHandler?(TunnelMessage.logDump(logBuffer.joined(separator: "\n")).encode())
+        default: completionHandler?(nil)
         }
     }
 }
