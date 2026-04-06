@@ -22,6 +22,10 @@ struct MainView: View {
                     NavigationLink(destination: SettingsView()) {
                         settingsRow(icon: "gearshape.fill", title: "Settings", subtitle: "Configure bypass techniques")
                     }
+
+                    NavigationLink(destination: LogView()) {
+                        settingsRow(icon: "doc.text.magnifyingglass", title: "Debug Log", subtitle: "View packet logs, share as TXT")
+                    }
                 }
                 .padding()
             }

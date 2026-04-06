@@ -29,6 +29,7 @@ class TCPRelay {
 
     /// Fake packet injector
     private let fakeInjector = FakePacketInjector()
+    private let dlog = DebugLogger.shared
 
     init(host: String, port: UInt16, config: DPIConfiguration, queue: DispatchQueue) {
         self.host = host
@@ -80,7 +81,7 @@ class TCPRelay {
         }
 
         if result < 0 && errno != EINPROGRESS {
-            print("[TCPRelay] connect() failed: \(errno)")
+            dlog.logError("RELAY connect() failed: \(host):\(port) errno=\(errno)")
             Darwin.close(socketFD)
             socketFD = -1
             return
@@ -107,6 +108,7 @@ class TCPRelay {
             }
 
             self.isConnected = true
+            self.dlog.log("RELAY CONNECTED: \(self.host):\(self.port)")
             self.startReceiving()
         }
         source.resume()
@@ -140,12 +142,15 @@ class TCPRelay {
             let bytes = [UInt8](data)
 
             if self.port == 80 && self.isFirstPayload {
+                self.dlog.log("RELAY SEND HTTP bypass: \(self.host):\(self.port) [\(bytes.count)B]")
                 self.sendHTTPWithBypass(bytes)
                 self.isFirstPayload = false
             } else if self.port == 443 && self.isFirstPayload && TLSParser.isClientHello(data) {
+                self.dlog.log("RELAY SEND TLS bypass: \(self.host):\(self.port) [\(bytes.count)B]")
                 self.sendTLSWithBypass(bytes)
                 self.isFirstPayload = false
             } else {
+                self.dlog.log("RELAY SEND raw: \(self.host):\(self.port) [\(bytes.count)B]")
                 Darwin.send(self.socketFD, bytes, bytes.count, 0)
             }
         }
@@ -213,9 +218,13 @@ class TCPRelay {
 
         if bytesRead > 0 {
             let data = Data(buffer[0..<bytesRead])
+            dlog.log("RELAY RECV: \(host):\(port) [\(bytesRead)B]")
             onOutput?(data)
         } else if bytesRead == 0 {
+            dlog.log("RELAY CLOSED: \(host):\(port)")
             disconnect()
+        } else if errno != EAGAIN {
+            dlog.logError("RELAY RECV ERROR: \(host):\(port) errno=\(errno)")
         }
         // bytesRead < 0 && errno == EAGAIN: no data yet
     }

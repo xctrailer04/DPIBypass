@@ -1,48 +1,54 @@
 import NetworkExtension
 import os.log
 
-/// Main Packet Tunnel Provider — the heart of the extension
 class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private let log = OSLog(subsystem: "com.voiplet.dpibypass.tunnel", category: "PacketTunnel")
+    private let dlog = DebugLogger.shared
     private var config = DPIConfiguration()
     private var pipeline: PacketPipeline?
     private let lwipStack = LwIPStack.shared
     private let rstDropper = RSTDropper()
+    private var packetCount: UInt64 = 0
+    private var droppedCount: UInt64 = 0
+    private var passedCount: UInt64 = 0
 
     // MARK: - Tunnel Lifecycle
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
-        os_log("Starting DPI Bypass tunnel", log: log, type: .info)
+        dlog.log("========== TUNNEL STARTING ==========")
+        dlog.log("Config loaded: HTTP tricks=\(config.httpHostReplace), HTTPS frag=\(config.httpsFragmentEnabled), DNS=\(config.dnsRedirectEnabled)")
 
         config = DPIConfiguration.load()
         pipeline = PacketPipeline(config: config)
 
         let tunnelSettings = createTunnelSettings()
+        dlog.log("Tunnel settings: DNS=\(config.dnsServer), routes=default")
 
         setTunnelNetworkSettings(tunnelSettings) { [weak self] error in
             if let error = error {
-                os_log("Failed to set tunnel settings: %{public}@", log: self?.log ?? .default, type: .error, error.localizedDescription)
+                self?.dlog.logError("setTunnelNetworkSettings failed: \(error.localizedDescription)")
                 completionHandler(error)
                 return
             }
 
-            os_log("Tunnel settings applied", log: self?.log ?? .default, type: .info)
-
-            // Initialize lwIP
+            self?.dlog.log("Tunnel settings applied OK")
             self?.lwipStack.updateConfig(self?.config ?? DPIConfiguration())
             self?.lwipStack.outputBlock = { [weak self] packets, protocols in
+                self?.dlog.log("lwIP OUTPUT: \(packets.count) packets, sizes=\(packets.map { $0.count })")
                 self?.packetFlow.writePackets(packets, withProtocols: protocols)
             }
             self?.lwipStack.initialize()
-
+            self?.dlog.log("lwIP initialized, starting packet processing")
             self?.startPacketProcessing()
             completionHandler(nil)
         }
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
-        os_log("Stopping tunnel, reason: %{public}d", log: log, type: .info, reason.rawValue)
+        dlog.log("========== TUNNEL STOPPING (reason=\(reason.rawValue)) ==========")
+        dlog.log("Stats: total=\(packetCount), passed=\(passedCount), dropped=\(droppedCount)")
+        dlog.flush()
         lwipStack.shutdown()
         completionHandler()
     }
@@ -64,6 +70,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let dns = NEDNSSettings(servers: [config.dnsServer])
             dns.matchDomains = [""]
             settings.dnsSettings = dns
+            dlog.log("DNS configured: \(config.dnsServer)")
         }
 
         settings.mtu = 1500
@@ -73,6 +80,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Packet Processing Loop
 
     private func startPacketProcessing() {
+        dlog.log("Packet processing loop started")
         readPacketsFromTUN()
     }
 
@@ -87,26 +95,82 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func handlePacket(_ data: Data, protocolFamily: NSNumber) {
+        packetCount += 1
+
+        // Log every 100th packet summary + first 20 packets
+        let shouldLog = packetCount <= 20 || packetCount % 100 == 0
+
         guard config.isEnabled else {
+            if shouldLog { dlog.log("BYPASS OFF - passthrough pkt#\(packetCount) [\(data.count)B]") }
             packetFlow.writePackets([data], withProtocols: [protocolFamily])
+            passedCount += 1
             return
         }
 
         let isOutbound = isOutboundPacket(data)
 
+        // Parse for logging
+        if let packet = PacketParser.parse(data) {
+            let srcIP = "\(packet.ipHeader.srcIP.0).\(packet.ipHeader.srcIP.1).\(packet.ipHeader.srcIP.2).\(packet.ipHeader.srcIP.3)"
+            let dstIP = "\(packet.ipHeader.dstIP.0).\(packet.ipHeader.dstIP.1).\(packet.ipHeader.dstIP.2).\(packet.ipHeader.dstIP.3)"
+            let proto = packet.isTCP ? "TCP" : (packet.isUDP ? "UDP" : "OTHER")
+            let dir = isOutbound ? "OUT" : "IN"
+            let flags = packet.tcpHeader.map { tcp in
+                var f = ""
+                if tcp.isSYN { f += "S" }
+                if tcp.isACK { f += "A" }
+                if tcp.isPSH { f += "P" }
+                if tcp.isFIN { f += "F" }
+                if tcp.isRST { f += "R" }
+                return f.isEmpty ? "-" : f
+            } ?? "-"
+
+            if shouldLog {
+                dlog.log("\(dir) #\(packetCount) \(proto) \(srcIP):\(packet.srcPort)→\(dstIP):\(packet.dstPort) flags=\(flags) [\(data.count)B] payload=\(packet.payload.count)B")
+            }
+
+            // Detect specific traffic for detailed logging
+            if packet.isHTTP && !packet.payload.isEmpty && isOutbound {
+                if let httpInfo = HTTPParser.parse(packet.payload) {
+                    dlog.log("  HTTP REQUEST: \(httpInfo.method) Host=\(httpInfo.hostValue)")
+                }
+            }
+            if packet.isHTTPS && !packet.payload.isEmpty && isOutbound {
+                if TLSParser.isClientHello(packet.payload) {
+                    let sni = TLSParser.extractSNI(from: packet.payload)?.hostname ?? "unknown"
+                    dlog.log("  TLS ClientHello SNI=\(sni)")
+                }
+            }
+            if packet.isDNS {
+                dlog.log("  DNS \(isOutbound ? "query" : "response") port=\(packet.dstPort)")
+            }
+        }
+
         if isOutbound {
-            // Outbound: feed to lwIP → TCPRelay applies DPI bypass → BSD socket to server
+            // Feed to lwIP
+            if shouldLog { dlog.log("  → feeding to lwIP") }
             lwipStack.input(packet: data)
+            passedCount += 1
         } else {
-            // Inbound: RST filtering + passive DPI blocking, then deliver to app
+            // Inbound: RST filtering + passive DPI blocking
             if let packet = PacketParser.parse(data) {
                 rstDropper.trackConnection(packet)
-                if rstDropper.shouldDropRST(packet) { return }
+
+                if rstDropper.shouldDropRST(packet) {
+                    dlog.log("  DROPPED: DPI RST detected")
+                    droppedCount += 1
+                    return
+                }
 
                 let result = PassiveDPIBlocker.shouldDrop(packet, config: config)
-                if result.drop { return }
+                if result.drop {
+                    dlog.log("  DROPPED: \(result.reason)")
+                    droppedCount += 1
+                    return
+                }
             }
             packetFlow.writePackets([data], withProtocols: [protocolFamily])
+            passedCount += 1
         }
     }
 
@@ -114,7 +178,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func isOutboundPacket(_ data: Data) -> Bool {
         guard data.count >= 20 else { return true }
-        // If destination is our TUN IP (10.0.0.2) → inbound
         return !(data[16] == 10 && data[17] == 0 && data[18] == 0 && data[19] == 2)
     }
 
@@ -140,7 +203,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.config = newConfig
             pipeline?.updateConfig(newConfig)
             lwipStack.updateConfig(newConfig)
-            os_log("Configuration updated", log: log, type: .info)
+            dlog.log("CONFIG UPDATED via IPC")
             completionHandler?(nil)
 
         default:

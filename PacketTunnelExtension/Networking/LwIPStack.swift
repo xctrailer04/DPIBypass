@@ -74,11 +74,15 @@ class LwIPStack {
         }
     }
 
+    private let dlog = DebugLogger.shared
+
     private func setupStack() {
+        dlog.log("lwIP bridge init starting")
         lwip_bridge_init()
         lwip_bridge_set_output_callback(lwipOutputCallback)
         lwip_bridge_set_tcp_recv_callback(lwipTCPRecvCallback)
         lwip_bridge_set_tcp_accept_callback(lwipTCPAcceptCallback)
+        dlog.log("lwIP bridge init complete, callbacks registered")
     }
 
     /// Forward TCP data from lwIP to the correct TCPRelay
@@ -145,6 +149,8 @@ class LwIPStack {
         let host = "\(dstIP.0).\(dstIP.1).\(dstIP.2).\(dstIP.3)"
         let connID = nextConnectionID
         nextConnectionID &+= 1
+
+        dlog.log("NEW RELAY: \(host):\(packet.dstPort) connID=\(connID) total=\(relays.count + 1)")
 
         let relay = TCPRelay(
             host: host,
