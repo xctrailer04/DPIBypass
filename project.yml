@@ -57,6 +57,10 @@ targets:
           - "lwip/lwip-src/src/core/ipv4/dhcp.c"
           - "lwip/lwip-src/src/core/ipv4/etharp.c"
           - "lwip/lwip-src/src/core/ipv4/igmp.c"
+          - "lwip/lwip-src/**/*.in"
+          - "lwip/lwip-src/**/*.cmake"
+          - "lwip/lwip-src/**/*.mk"
+          - "lwip/lwip-src/**/*.sh"
       - Shared/
     info:
       path: PacketTunnelExtension/Info.plist
