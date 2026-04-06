@@ -131,13 +131,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             state.srcPort = pkt.srcPort
             state.dstPort = pkt.dstPort
 
-            // Send SYN+ACK back to app
+            // Send SYN+ACK back to app (with TCP options: MSS, SACK, Window Scale)
             let synack = buildTCPPacket(
                 srcIP: state.dstIP, dstIP: state.srcIP,
                 srcPort: state.dstPort, dstPort: state.srcPort,
                 seq: state.localSeq, ack: state.remoteSeq,
                 flags: TCPHeader.SYN | TCPHeader.ACK,
-                payload: Data()
+                payload: Data(),
+                isSYNACK: true
             )
             state.localSeq &+= 1  // SYN consumes 1 seq
             packetFlow.writePackets([synack], withProtocols: [NSNumber(value: AF_INET)])
@@ -241,23 +242,36 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Send server response back to app via TUN as TCP packets
+    /// Splits large data into MSS-sized chunks (max 1400 bytes per packet)
     private func sendDataToApp(from conn: NWTCPConnection, data: Data) {
-        // Find which state this connection belongs to
         for (key, var state) in tcpStates {
             if state.conn === conn {
-                // Build TCP data packet: server → app
-                let packet = buildTCPPacket(
-                    srcIP: state.dstIP, dstIP: state.srcIP,
-                    srcPort: state.dstPort, dstPort: state.srcPort,
-                    seq: state.localSeq, ack: state.remoteSeq,
-                    flags: TCPHeader.ACK | TCPHeader.PSH,
-                    payload: data
-                )
-                state.localSeq &+= UInt32(data.count)
-                tcpStates[key] = state
+                let mss = 1400
+                var offset = 0
+                var packets: [Data] = []
 
-                packetFlow.writePackets([packet], withProtocols: [NSNumber(value: AF_INET)])
-                dlog("TCP→APP: \(key) [\(data.count)B]")
+                while offset < data.count {
+                    let end = min(offset + mss, data.count)
+                    let chunk = data[offset..<end]
+                    let isLast = end >= data.count
+                    let flags: UInt8 = isLast ? (TCPHeader.ACK | TCPHeader.PSH) : TCPHeader.ACK
+
+                    let packet = buildTCPPacket(
+                        srcIP: state.dstIP, dstIP: state.srcIP,
+                        srcPort: state.dstPort, dstPort: state.srcPort,
+                        seq: state.localSeq, ack: state.remoteSeq,
+                        flags: flags,
+                        payload: Data(chunk)
+                    )
+                    state.localSeq &+= UInt32(chunk.count)
+                    packets.append(packet)
+                    offset = end
+                }
+
+                tcpStates[key] = state
+                let protos = packets.map { _ in NSNumber(value: AF_INET) }
+                packetFlow.writePackets(packets, withProtocols: protos)
+                dlog("TCP→APP: \(key) [\(data.count)B] \(packets.count) segs")
                 return
             }
         }
@@ -268,8 +282,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func buildTCPPacket(srcIP: (UInt8,UInt8,UInt8,UInt8), dstIP: (UInt8,UInt8,UInt8,UInt8),
                                  srcPort: UInt16, dstPort: UInt16,
                                  seq: UInt32, ack: UInt32,
-                                 flags: UInt8, payload: Data) -> Data {
-        let tcpHeaderLen = 20
+                                 flags: UInt8, payload: Data,
+                                 isSYNACK: Bool = false) -> Data {
+        // SYN+ACK needs TCP options (MSS, Window Scale, SACK permitted)
+        let tcpOptionsLen: Int = isSYNACK ? 12 : 0  // MSS(4) + WS(3) + SACK(2) + NOP(1) + pad(2)
+        let tcpHeaderLen = 20 + tcpOptionsLen
         let ipHeaderLen = 20
         let totalLen = ipHeaderLen + tcpHeaderLen + payload.count
 
@@ -293,9 +310,22 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         pkt[t+6] = UInt8((seq >> 8) & 0xFF); pkt[t+7] = UInt8(seq & 0xFF)
         pkt[t+8] = UInt8((ack >> 24) & 0xFF); pkt[t+9] = UInt8((ack >> 16) & 0xFF)
         pkt[t+10] = UInt8((ack >> 8) & 0xFF); pkt[t+11] = UInt8(ack & 0xFF)
-        pkt[t+12] = 0x50  // Data offset: 5 words (20 bytes)
+        pkt[t+12] = UInt8((tcpHeaderLen / 4) << 4)  // Data offset
         pkt[t+13] = flags
         pkt[t+14] = 0xFF; pkt[t+15] = 0xFF  // Window size: 65535
+
+        // TCP Options for SYN+ACK
+        if isSYNACK {
+            let o = t + 20
+            // MSS = 1460 (kind=2, len=4)
+            pkt[o]   = 2; pkt[o+1] = 4; pkt[o+2] = 0x05; pkt[o+3] = 0xB4
+            // SACK Permitted (kind=4, len=2)
+            pkt[o+4] = 4; pkt[o+5] = 2
+            // Window Scale = 6 (kind=3, len=3, shift=6)
+            pkt[o+6] = 3; pkt[o+7] = 3; pkt[o+8] = 6
+            // NOP padding (kind=1) x3
+            pkt[o+9] = 1; pkt[o+10] = 1; pkt[o+11] = 1
+        }
 
         // Payload
         if !payload.isEmpty {
