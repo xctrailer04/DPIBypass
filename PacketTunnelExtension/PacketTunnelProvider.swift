@@ -27,18 +27,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         dlog("TUNNEL START")
         config = DPIConfiguration.load()
 
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.0.0.1")
-        let ipv4 = NEIPv4Settings(addresses: ["10.0.0.2"], subnetMasks: ["255.255.255.0"])
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "1.1.1.1")
+
+        // IPv4 — route ALL traffic through tunnel
+        let ipv4 = NEIPv4Settings(addresses: ["192.168.20.1"], subnetMasks: ["255.255.255.0"])
         ipv4.includedRoutes = [NEIPv4Route.default()]
-        ipv4.excludedRoutes = [
-            NEIPv4Route(destinationAddress: "10.0.0.0", subnetMask: "255.255.255.0"),
-            NEIPv4Route(destinationAddress: "127.0.0.0", subnetMask: "255.0.0.0"),
-        ]
         settings.ipv4Settings = ipv4
+
+        // DNS
         let dns = NEDNSSettings(servers: [config.dnsServer])
         dns.matchDomains = [""]
         settings.dnsSettings = dns
+
         settings.mtu = 1500
+        dlog("Settings: remoteAddr=1.1.1.1 tunIP=192.168.20.1 dns=\(config.dnsServer)")
 
         setTunnelNetworkSettings(settings) { [weak self] error in
             if let error = error {
@@ -76,29 +78,38 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private func processPacket(_ data: Data, proto: NSNumber) {
         packetCount += 1
         guard let pkt = PacketParser.parse(data) else {
-            // Can't parse — drop
+            if packetCount <= 50 { dlog("#\(packetCount) UNPARSEABLE [\(data.count)B] first=\(data.prefix(4).map{String(format:"%02x",$0)}.joined())") }
             return
         }
 
+        let src = pkt.ipHeader.srcIP
         let dst = pkt.ipHeader.dstIP
-        let host = "\(dst.0).\(dst.1).\(dst.2).\(dst.3)"
+        let srcStr = "\(src.0).\(src.1).\(src.2).\(src.3)"
+        let dstStr = "\(dst.0).\(dst.1).\(dst.2).\(dst.3)"
         let dstPort = pkt.dstPort
+        let shouldLog = packetCount <= 50 || packetCount % 200 == 0
 
-        let shouldLog = packetCount <= 30 || packetCount % 300 == 0
+        // Log ALL packets for debugging
+        if shouldLog {
+            let p = pkt.isTCP ? "TCP" : pkt.isUDP ? "UDP" : "proto=\(pkt.ipHeader.proto)"
+            let flags = pkt.tcpHeader.map { t in
+                var f = ""; if t.isSYN { f += "S" }; if t.isACK { f += "A" }
+                if t.isPSH { f += "P" }; if t.isFIN { f += "F" }; if t.isRST { f += "R" }
+                return f.isEmpty ? "-" : f
+            } ?? ""
+            dlog("#\(packetCount) \(p) \(srcStr):\(pkt.srcPort)→\(dstStr):\(dstPort) flags=\(flags) [\(data.count)B] pay=\(pkt.payload.count)")
+        }
 
-        if pkt.isTCP && !pkt.payload.isEmpty {
-            if shouldLog {
-                dlog("#\(packetCount) TCP \(host):\(dstPort) [\(pkt.payload.count)B payload]")
+        if pkt.isTCP {
+            if let tcp = pkt.tcpHeader, tcp.isSYN && !tcp.isACK {
+                dlog("  → TCP SYN new conn to \(dstStr):\(dstPort)")
+                ensureTCPConnection(host: dstStr, port: dstPort)
             }
-            handleTCPData(host: host, port: dstPort, payload: pkt.payload)
+            if !pkt.payload.isEmpty {
+                handleTCPData(host: dstStr, port: dstPort, payload: pkt.payload)
+            }
         } else if pkt.isUDP && !pkt.payload.isEmpty {
-            if shouldLog {
-                dlog("#\(packetCount) UDP \(host):\(dstPort) [\(pkt.payload.count)B payload]")
-            }
-            handleUDPData(host: host, port: dstPort, payload: pkt.payload)
-        } else if pkt.isTCP, let tcp = pkt.tcpHeader, tcp.isSYN && !tcp.isACK {
-            dlog("#\(packetCount) TCP SYN → \(host):\(dstPort)")
-            ensureTCPConnection(host: host, port: dstPort)
+            handleUDPData(host: dstStr, port: dstPort, payload: pkt.payload)
         }
     }
 
