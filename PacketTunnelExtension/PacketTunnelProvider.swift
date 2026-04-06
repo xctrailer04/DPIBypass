@@ -115,9 +115,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        // TCP to a fake IP (198.18.x.x) — this means we assigned this IP via fake DNS
-        if pkt.isTCP && dst.0 == 198 && dst.1 == 18 {
-            handleTCPToFakeIP(pkt, rawPacket: data, fakeIP: dstStr)
+        // ALL TCP traffic — proxy to real network
+        if pkt.isTCP {
+            handleTCPPacket(pkt, rawPacket: data, dstStr: dstStr)
             return
         }
 
@@ -251,19 +251,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         return parts.isEmpty ? nil : parts.joined(separator: ".")
     }
 
-    // MARK: - TCP to Fake IP
+    // MARK: - TCP Proxy
 
-    private func handleTCPToFakeIP(_ pkt: ParsedPacket, rawPacket: Data, fakeIP: String) {
+    private func handleTCPPacket(_ pkt: ParsedPacket, rawPacket: Data, dstStr: String) {
         guard let tcp = pkt.tcpHeader else { return }
 
-        // Look up real hostname from fake IP
-        let realHost = fakeIPToHost[fakeIP] ?? fakeIP
+        let host = fakeIPToHost[dstStr] ?? dstStr  // Try fake IP lookup, fallback to real IP
         let port = pkt.dstPort
-        let key = "\(fakeIP):\(port)"
+        let key = "\(dstStr):\(port)"
 
         if tcp.isSYN && !tcp.isACK {
-            dlog("TCP SYN → fake=\(fakeIP) real=\(realHost):\(port)")
-            ensureTCPConnection(key: key, host: realHost, port: port)
+            dlog("TCP SYN → \(dstStr) (host=\(host)):\(port)")
+            ensureTCPConnection(key: key, host: host, port: port)
         }
 
         if !pkt.payload.isEmpty {
